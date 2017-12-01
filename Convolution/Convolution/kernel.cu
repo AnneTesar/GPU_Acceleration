@@ -20,6 +20,348 @@ Credit and thanks to https://github.com/Teknoman117/cuda/blob/master/imgproc_exa
 
 __constant__ float convolutionKernelStore[256];
 
+void captureBackgroundImage();
+unsigned char *createImageBuffer(unsigned int bytes, unsigned char **devicePtr);
+__global__ void pythagoras(unsigned char *a, unsigned char *b, unsigned char *c);
+__global__ void convolve(unsigned char *source, int width, int height, int paddingX, int paddingY, size_t kOffset, int kWidth, int kHeight, unsigned char *destination);
+__global__ void subtractImages(unsigned char *img1, unsigned char *img2, int width, int height, float threshold, unsigned char *destination);
+
+void handleKeypress();
+int keypress, backgroundSet = 0;
+cv::Mat background, backgroundGreyscale;
+
+
+enum Operations {
+	Normal,
+	Greyscale,
+	Subtraction,
+	Background,
+	Tracking
+}activeOperation;
+cv::VideoCapture camera_front(0);
+cv::VideoCapture camera_back(1);
+cv::VideoCapture camera_usb(2);
+cv::VideoCapture activeCamera = camera_front;
+
+int activeProcessing = 0; /* 0 = Use the GPU. 1 = Use the CPU */
+float threshold = 100;
+
+int main() {
+	if (!camera_front.isOpened()) {
+		std::cout << "Front camera not opened" << std::endl;
+		activeCamera = camera_back;
+	}
+	if (!camera_back.isOpened()) {
+		std::cout << "Back camera not opened" << std::endl;
+	}
+	if (!camera_usb.isOpened()) {
+		std::cout << "USB camera not opened" << std::endl;
+	}
+
+	cv::Mat frame;
+	cv::Mat background;
+
+
+	cudaEvent_t start, stop;
+	cudaEventCreate(&start);
+	cudaEventCreate(&stop);
+
+	const float gaussianKernel[25] =
+	{
+		2.f / 159.f,  4.f / 159.f,  5.f / 159.f,  4.f / 159.f, 2.f / 159.f,
+		4.f / 159.f,  9.f / 159.f, 12.f / 159.f,  9.f / 159.f, 4.f / 159.f,
+		5.f / 159.f, 12.f / 159.f, 15.f / 159.f, 12.f / 159.f, 5.f / 159.f,
+		4.f / 159.f,  9.f / 159.f, 12.f / 159.f,  9.f / 159.f, 4.f / 159.f,
+		2.f / 159.f,  4.f / 159.f,  5.f / 159.f,  4.f / 159.f, 2.f / 159.f,
+	};
+	cudaMemcpyToSymbol(convolutionKernelStore, gaussianKernel, sizeof(gaussianKernel), 0);
+	const size_t gaussianKernelOffset = 0;
+
+	const float embossKernel[9] =
+	{
+		1.f, 2.f, 1.f,
+		0.f, 0.f, 0.f,
+		-1.f, -2.f, -1.f,
+		/*-1.f, -1.f, -1.f,
+		-1.f, 9.f, -1.f,
+		-1.f, -1.f, -1.f,*/
+		/*0.f, -1.f, 0.f,
+		-1.f, 5.f, -1.f,
+		0.f, -1.f, 0.f,*/
+	};
+	cudaMemcpyToSymbol(convolutionKernelStore, embossKernel, sizeof(embossKernel), sizeof(gaussianKernel));
+	const size_t embossKernelOffset = sizeof(gaussianKernel) / sizeof(float);
+
+	const float outlineKernel[9] =
+	{
+		-1.f, -1.f, -1.f,
+		-1.f, 8.f, -1.f,
+		-1.f, -1.f, -1.f,
+	};
+	cudaMemcpyToSymbol(convolutionKernelStore, outlineKernel, sizeof(outlineKernel), sizeof(gaussianKernel) + sizeof(embossKernel));
+	const size_t outlineKernelOffset = sizeof(embossKernel) / sizeof(float) + embossKernelOffset;
+
+	const float leftSobelKernel[9] =
+	{
+		1.f, 0.f, -1.f,
+		2.f, 0.f, -2.f,
+		1.f, 0.f, -1.f,
+	};
+	cudaMemcpyToSymbol(convolutionKernelStore, leftSobelKernel, sizeof(leftSobelKernel), sizeof(gaussianKernel) + sizeof(embossKernel) + sizeof(outlineKernel));
+	const size_t leftSobelKernelOffset = sizeof(outlineKernel) / sizeof(float) + outlineKernelOffset;
+	const float topSobelKernel[9] =
+	{
+		1.f, 2.f, 1.f,
+		0.f, 0.f, 0.f,
+		-1.f, -2.f, -1.f,
+	};
+	cudaMemcpyToSymbol(convolutionKernelStore, topSobelKernel, sizeof(topSobelKernel), sizeof(gaussianKernel) + sizeof(embossKernel) + sizeof(outlineKernel) + sizeof(leftSobelKernel));
+	const size_t topSobelKernelOffset = sizeof(leftSobelKernel) / sizeof(float) + leftSobelKernelOffset;
+
+	activeCamera >> frame;
+	unsigned char *greyscaleDataDevice2, *greyscaleDataDevice1, *backgroundGreyscaleDataDevice, *bufferDataDevice, *displayDataDevice;
+	cv::Mat greyscale1(frame.size(), CV_8U, createImageBuffer(frame.size().width * frame.size().height, &greyscaleDataDevice1));
+	cv::Mat greyscale2(frame.size(), CV_8U, createImageBuffer(frame.size().width * frame.size().height, &greyscaleDataDevice2));
+	cv::Mat backgroundGreyscale(frame.size(), CV_8U, createImageBuffer(frame.size().width * frame.size().height, &backgroundGreyscaleDataDevice));
+	cv::Mat buffer(frame.size(), CV_8U, createImageBuffer(frame.size().width * frame.size().height, &bufferDataDevice));
+	cv::Mat display(frame.size(), CV_8U, createImageBuffer(frame.size().width * frame.size().height, &displayDataDevice));
+	cv::Mat greyscale, greyscalePrev;
+
+	int greyscaleState = 1;
+	int keypressCur;
+
+	while (1) {
+		activeCamera >> frame;
+		if (greyscaleState == 1) {
+			cv::cvtColor(frame, greyscale1, CV_BGR2GRAY);
+			greyscalePrev = greyscale2;
+			greyscale = greyscale1;
+			greyscaleState = 2;
+		}
+		else {
+			cv::cvtColor(frame, greyscale2, CV_BGR2GRAY);
+			greyscalePrev = greyscale1;
+			greyscale = greyscale2;
+			greyscaleState = 1;
+		}
+		
+
+
+		if (activeProcessing == 0) {
+			dim3 cblocks(frame.size().width / 16, frame.size().height / 16);
+			dim3 cthreads(16, 16);
+			dim3 pblocks(frame.size().width * frame.size().height / 256);
+			dim3 pthreads(256, 1);
+			cudaEventRecord(start);
+			{
+				switch (activeOperation) {
+				case Normal:
+					display = frame;
+					break;
+				case Greyscale:
+					display = greyscale;
+					break;
+				case Subtraction:	
+					subtractImages << <cblocks, cthreads >> > (greyscale.data, greyscalePrev.data, frame.size().width, frame.size().height, threshold, bufferDataDevice);
+					display = buffer;
+					break;
+				case Background:
+					if (backgroundSet) {
+						subtractImages << <cblocks, cthreads >> > (backgroundGreyscale.data, greyscale.data, frame.size().width, frame.size().height, threshold, bufferDataDevice);
+						display = buffer;
+					}
+					else std::cout << "Please use 'p' to capture background image" << std::endl;
+					break;
+				case Tracking:
+					
+					break;
+				default:
+					break;
+				}
+				cudaDeviceSynchronize();
+			}
+			cudaEventRecord(stop);
+			float ms = 0.0f;
+			cudaEventSynchronize(stop);
+			cudaEventElapsedTime(&ms, start, stop);
+			std::cout << "Elapsed GPU time: " << ms << " milliseconds" << std::endl;
+		}
+
+
+		if (display.size().height > 0) {
+			cv::namedWindow("Convolution", cv::WINDOW_AUTOSIZE);
+			cv::imshow("Convolution", display);
+		}
+
+		keypressCur = cv::waitKey(1);
+		if (keypressCur < 255) {
+			keypress = keypressCur;
+			handleKeypress();
+		}
+
+		if (keypress == 27) break;
+	}
+
+	cudaFreeHost(greyscale1.data);
+	cudaFreeHost(greyscale2.data);
+	cudaFreeHost(backgroundGreyscale.data);
+	cudaFreeHost(buffer.data);
+	cudaFreeHost(display.data);
+
+	return 0;
+}
+
+void captureBackgroundImage() {
+	std::cout << "Take Background Picture by pressing 'p' " << std::endl;
+	while (1) if (cv::waitKey(1) == 112) break;
+	activeCamera >> background;
+	cv::cvtColor(background, backgroundGreyscale, CV_BGR2GRAY);
+	backgroundSet = 1;
+}
+
+unsigned char *createImageBuffer(unsigned int bytes, unsigned char **devicePtr) {
+
+	unsigned char *ptr = NULL;
+	cudaSetDeviceFlags(cudaDeviceMapHost);
+	cudaHostAlloc(&ptr, bytes, cudaHostAllocMapped);
+	cudaHostGetDevicePointer(devicePtr, ptr, 0);
+	return ptr;
+}
+
+__global__ void pythagoras(unsigned char *a, unsigned char *b, unsigned char *c)
+{
+	int idx = (blockIdx.x * blockDim.x) + threadIdx.x;
+
+	float af = float(a[idx]);
+	float bf = float(b[idx]);
+
+	c[idx] = (unsigned char)sqrtf(af*af + bf*bf);
+}
+
+__global__ void convolve(unsigned char *source, int width, int height, int paddingX, int paddingY, size_t kOffset, int kWidth, int kHeight, unsigned char *destination) {
+
+	int x = (blockIdx.x * blockDim.x) + threadIdx.x;
+	int y = (blockIdx.y * blockDim.y) + threadIdx.y;
+
+	float sum = 0.0;
+	int pWidth = kWidth / 2;
+	int pHeight = kHeight / 2;
+
+	// Only execute for valid pixels
+	if (x >= pWidth + paddingX &&
+		y >= pHeight + paddingY &&
+		x < (blockDim.x * gridDim.x) - pWidth - paddingX &&
+		y < (blockDim.y * gridDim.y) - pHeight - paddingY)
+	{
+		for (int j = -pHeight; j <= pHeight; j++)
+		{
+			for (int i = -pWidth; i <= pWidth; i++)
+			{
+				// Sample the weight for this location
+				int ki = (i + pWidth);
+				int kj = (j + pHeight);
+				float w = convolutionKernelStore[(kj * kWidth) + ki + kOffset];
+
+
+				sum += w * float(source[((y + j) * width) + (x + i)]);
+			}
+		}
+	}
+
+	destination[(y * width) + x] = (unsigned char)sum;
+}
+
+__global__ void subtractImages(unsigned char *img1, unsigned char *img2, int width, int height, float threshold, unsigned char *destination) {
+
+	int x = (blockIdx.x * blockDim.x) + threadIdx.x;
+	int y = (blockIdx.y * blockDim.y) + threadIdx.y;
+
+	float pixel = abs(img1[(y * width) + x] - img2[(y * width) + x]);
+	if (pixel > threshold) {
+		destination[(y * width) + x] = 255.0f;
+	}
+	else {
+		destination[(y * width) + x] = 0.0f;
+	}
+}
+
+void handleKeypress() {
+
+	switch (keypress) {
+	case 97: /* a */
+		activeOperation = Normal;
+		break;
+	case 115: /* s */
+		activeOperation = Greyscale;
+		break;
+	case 100: /* d */
+		activeOperation = Subtraction;
+		break;
+	case 102: /* f */
+		activeOperation = Background;
+		break;
+	case 103: /* g */
+		activeOperation = Tracking;
+		break;
+	case 104: /* h */
+		break;
+
+	case 113: /* q */
+		activeCamera = camera_front;
+		break;
+	case 119: /* w */
+		activeCamera = camera_back;
+		break;
+
+	case 122: /* z */
+		activeProcessing = 0;
+		break;
+	case 120: /* x */
+		activeProcessing = 1;
+		break;
+
+	case 116: /* t */
+		threshold += 5;
+		break;
+	case 121: /* y */
+		threshold -= 5;
+		break;
+
+	case 112: /* p */
+		captureBackgroundImage();
+	default:
+		break;
+	}
+
+}
+#endif
+
+
+
+
+/* Convolution Filter Video */
+#if 0
+
+/*
+Credit and thanks to https://github.com/Teknoman117/cuda/blob/master/imgproc_example/main.cu
+*/
+
+#include <stdlib.h>
+#include <stddef.h>
+#include <stdio.h>
+#include <string.h>
+#include <math.h>
+#include <time.h>
+
+#include <cuda_runtime.h>
+
+#include "opencv2/opencv.hpp"
+#include "opencv2/core.hpp"
+#include "opencv2/highgui.hpp"
+#include "opencv2/imgproc.hpp"
+
+__constant__ float convolutionKernelStore[256];
+
 unsigned char *createImageBuffer(unsigned int bytes, unsigned char **devicePtr);
 __global__ void pythagoras(unsigned char *a, unsigned char *b, unsigned char *c);
 __global__ void convolve(unsigned char *source, int width, int height, int paddingX, int paddingY, size_t kOffset, int kWidth, int kHeight, unsigned char *destination);
