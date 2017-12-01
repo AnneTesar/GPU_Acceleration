@@ -27,8 +27,8 @@ __global__ void convolve(unsigned char *source, int width, int height, int paddi
 __global__ void subtractImages(unsigned char *img1, unsigned char *img2, int width, int height, float threshold, unsigned char *destination);
 
 void handleKeypress();
-int keypress, backgroundSet = 0;
-cv::Mat background, backgroundGreyscale;
+int keypress;
+
 
 
 enum Operations {
@@ -60,7 +60,7 @@ int main() {
 
 	cv::Mat frame;
 	cv::Mat background;
-
+	int backgroundSet = 0;
 
 	cudaEvent_t start, stop;
 	cudaEventCreate(&start);
@@ -167,10 +167,16 @@ int main() {
 					break;
 				case Background:
 					if (backgroundSet) {
-						subtractImages << <cblocks, cthreads >> > (backgroundGreyscale.data, greyscale.data, frame.size().width, frame.size().height, threshold, bufferDataDevice);
+						subtractImages << <cblocks, cthreads >> > (greyscale.data, backgroundGreyscale.data, frame.size().width, frame.size().height, threshold, bufferDataDevice);
 						display = buffer;
 					}
-					else std::cout << "Please use 'p' to capture background image" << std::endl;
+					else {
+						std::cout << "Take Background Picture by pressing 'p' " << std::endl;
+						while (1) if (cv::waitKey(1) == 112) break;
+						activeCamera >> background;
+						cv::cvtColor(background, backgroundGreyscale, CV_BGR2GRAY);
+						backgroundSet = 1;
+					}
 					break;
 				case Tracking:
 					
@@ -212,11 +218,7 @@ int main() {
 }
 
 void captureBackgroundImage() {
-	std::cout << "Take Background Picture by pressing 'p' " << std::endl;
-	while (1) if (cv::waitKey(1) == 112) break;
-	activeCamera >> background;
-	cv::cvtColor(background, backgroundGreyscale, CV_BGR2GRAY);
-	backgroundSet = 1;
+
 }
 
 unsigned char *createImageBuffer(unsigned int bytes, unsigned char **devicePtr) {
@@ -276,8 +278,8 @@ __global__ void subtractImages(unsigned char *img1, unsigned char *img2, int wid
 	int x = (blockIdx.x * blockDim.x) + threadIdx.x;
 	int y = (blockIdx.y * blockDim.y) + threadIdx.y;
 
-	float pixel = abs(img1[(y * width) + x] - img2[(y * width) + x]);
-	if (pixel > threshold) {
+	float pixelDifference = abs(img1[(y * width) + x] - img2[(y * width) + x]);
+	if (pixelDifference > threshold) {
 		destination[(y * width) + x] = 255.0f;
 	}
 	else {
@@ -322,9 +324,11 @@ void handleKeypress() {
 
 	case 116: /* t */
 		threshold += 5;
+		std::cout << "\nThreshold = " << threshold << "\n" << std::endl;
 		break;
 	case 121: /* y */
 		threshold -= 5;
+		std::cout << "\nThreshold = " << threshold << "\n" << std::endl;
 		break;
 
 	case 112: /* p */
