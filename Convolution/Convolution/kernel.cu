@@ -1,4 +1,9 @@
 #if 1
+
+/*
+Credit and thanks to https://github.com/Teknoman117/cuda/blob/master/imgproc_example/main.cu
+*/
+
 #include <stdlib.h>
 #include <stddef.h>
 #include <stdio.h>
