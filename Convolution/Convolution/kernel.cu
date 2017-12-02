@@ -4,6 +4,7 @@
 Credit and thanks to https://github.com/Teknoman117/cuda/blob/master/imgproc_example/main.cu
 */
 
+// GPU benchmark control
 #define TIME_GPU 1
 
 #include <stdlib.h>
@@ -24,7 +25,10 @@ Credit and thanks to https://github.com/Teknoman117/cuda/blob/master/imgproc_exa
 cudaEvent_t start, stop;
 #endif
 
+// convolution kernels
 __constant__ float convolutionKernelStore[256];
+// structuring elements
+__constant__ bool structuringElementStore[256];
 
 unsigned char *createImageBuffer(unsigned int bytes, unsigned char **devicePtr);
 
@@ -37,10 +41,14 @@ __global__ void convolve(unsigned char *source, int width, int height, int paddi
 void subtractImagesWrapper(dim3 blocks, dim3 threads, unsigned char *img1, unsigned char *img2, int width, int height, float threshold, unsigned char *destination);
 __global__ void subtractImages(unsigned char *img1, unsigned char *img2, int width, int height, float threshold, unsigned char *destination);
 
+void erodeFilterWrapper(dim3 blocks, dim3 threads, unsigned char *source, int width, int height, int paddingX, int paddingY, size_t kOffset, int kWidth, int kHeight, unsigned char *destination);
+__global__ void erodeFilter(unsigned char *source, int width, int height, int paddingX, int paddingY, size_t kOffset, int kWidth, int kHeight, unsigned char *destination);
+
+void dilateFilterWrapper(dim3 blocks, dim3 threads, unsigned char *source, int width, int height, int paddingX, int paddingY, size_t kOffset, int kWidth, int kHeight, unsigned char *destination);
+__global__ void dilateFilter(unsigned char *source, int width, int height, int paddingX, int paddingY, size_t kOffset, int kWidth, int kHeight, unsigned char *destination);
+
 void handleKeypress();
 int keypress;
-
-
 
 enum Operations {
 	Normal,
@@ -54,6 +62,7 @@ cv::VideoCapture camera_back(1);
 cv::VideoCapture camera_usb(2);
 cv::VideoCapture activeCamera = camera_front;
 
+// default calibration threshold
 float threshold = 50;
 
 int main() {
@@ -76,6 +85,9 @@ int main() {
 	cudaEventCreate(&start);
 	cudaEventCreate(&stop);
 #endif
+
+	/// CONVOLUTION KERNELS
+
 	const float gaussianKernel[25] =
 	{
 		2.f / 159.f,  4.f / 159.f,  5.f / 159.f,  4.f / 159.f, 2.f / 159.f,
@@ -128,14 +140,64 @@ int main() {
 	cudaMemcpyToSymbol(convolutionKernelStore, topSobelKernel, sizeof(topSobelKernel), sizeof(gaussianKernel) + sizeof(embossKernel) + sizeof(outlineKernel) + sizeof(leftSobelKernel));
 	const size_t topSobelKernelOffset = sizeof(leftSobelKernel) / sizeof(float) + leftSobelKernelOffset;
 
+	/// STRUCTURING ELEMENTS
+
+	const bool binaryCircle3x3[9] =
+	{
+		0, 1, 0,
+		1, 1, 1,
+		0, 1, 0
+	};
+	cudaMemcpyToSymbol(structuringElementStore, binaryCircle3x3, sizeof(binaryCircle3x3), 0);
+	const size_t binaryCircle3x3Offset = 0;
+
+	const bool binaryCircle5x5[25] =
+	{
+		0, 1, 1, 1, 0,
+		1, 1, 1, 1, 1,
+		1, 1, 1, 1, 1,
+		1, 1, 1, 1, 1,
+		0, 1, 1, 1, 0
+	};
+	cudaMemcpyToSymbol(structuringElementStore, binaryCircle5x5, sizeof(binaryCircle5x5), sizeof(binaryCircle3x3) / sizeof(binaryCircle3x3[0]));
+	const size_t binaryCircle5x5Offset = binaryCircle3x3Offset + (sizeof(binaryCircle3x3) / sizeof(binaryCircle3x3[0]));
+
+	const bool binaryCircle7x7[49] =
+	{
+		0, 0, 1, 1, 1, 0, 0,
+		0, 1, 1, 1, 1, 1, 0,
+		1, 1, 1, 1, 1, 1, 1,
+		1, 1, 1, 1, 1, 1, 1,
+		1, 1, 1, 1, 1, 1, 1,
+		0, 1, 1, 1, 1, 1, 0,
+		0, 0, 1, 1, 1, 0, 0,
+	};
+	cudaMemcpyToSymbol(structuringElementStore, binaryCircle7x7, sizeof(binaryCircle7x7), binaryCircle5x5Offset + (sizeof(binaryCircle5x5) / sizeof(binaryCircle5x5[0])));
+	const size_t binaryCircle7x7Offset = binaryCircle5x5Offset + (sizeof(binaryCircle5x5) / sizeof(binaryCircle5x5[0]));
+
 	activeCamera >> frame;
-	unsigned char *greyscaleDataDevice2, *greyscaleDataDevice1, *backgroundGreyscaleDataDevice, *bufferDataDevice, *displayDataDevice;
+	unsigned char *greyscaleDataDevice2,
+		*greyscaleDataDevice1,
+		*backgroundGreyscaleDataDevice,
+		*thresholdDataDevice,
+		*erosionDataDevice,
+		*dilateDataDevice,
+		*bufferDataDevice,
+		*displayDataDevice;
 	cv::Mat greyscale1(frame.size(), CV_8U, createImageBuffer(frame.size().width * frame.size().height, &greyscaleDataDevice1));
 	cv::Mat greyscale2(frame.size(), CV_8U, createImageBuffer(frame.size().width * frame.size().height, &greyscaleDataDevice2));
 	cv::Mat backgroundGreyscale(frame.size(), CV_8U, createImageBuffer(frame.size().width * frame.size().height, &backgroundGreyscaleDataDevice));
+	cv::Mat thresholdImage(frame.size(), CV_8U, createImageBuffer(frame.size().width * frame.size().height, &thresholdDataDevice));
+	cv::Mat erosion(frame.size(), CV_8U, createImageBuffer(frame.size().width * frame.size().height, &erosionDataDevice));
+	cv::Mat dilation(frame.size(), CV_8U, createImageBuffer(frame.size().width * frame.size().height, &dilateDataDevice));
 	cv::Mat buffer(frame.size(), CV_8U, createImageBuffer(frame.size().width * frame.size().height, &bufferDataDevice));
 	cv::Mat display(frame.size(), CV_8U, createImageBuffer(frame.size().width * frame.size().height, &displayDataDevice));
 	cv::Mat greyscale, greyscalePrev;
+	cv::Mat hsvimage;
+
+	// object HSV thresholds
+	std::vector<unsigned char> lower_hsv = { 170, 150, 91 };
+	std::vector<unsigned char> upper_hsv = { 185, 255, 255 };
 
 	int greyscaleState = 1;
 	int keypressCur;
@@ -154,7 +216,10 @@ int main() {
 			greyscale = greyscale2;
 			greyscaleState = 1;
 		}
-		
+
+		// convert to HSV
+		cv::cvtColor(frame, hsvimage, CV_BGR2HSV);
+		cv::inRange(hsvimage, lower_hsv, upper_hsv, thresholdImage);
 
 
 		dim3 cblocks(frame.size().width / 16, frame.size().height / 16);
@@ -169,7 +234,7 @@ int main() {
 			case Greyscale:
 				display = greyscale;
 				break;
-			case Subtraction:	
+			case Subtraction:
 				subtractImagesWrapper(cblocks, cthreads, greyscale.data, greyscalePrev.data, frame.size().width, frame.size().height, threshold, bufferDataDevice);
 				display = buffer;
 				break;
@@ -187,14 +252,18 @@ int main() {
 				}
 				break;
 			case Tracking:
-					
+//				display = thresholdImage;
+//				erodeFilterWrapper(cblocks, cthreads, thresholdDataDevice, frame.size().width, frame.size().height, 0, 0, binaryCircle5x5Offset, 5, 5, erosionDataDevice);
+//				display = erosion;
+				dilateFilterWrapper(cblocks, cthreads, thresholdDataDevice, frame.size().width, frame.size().height, 0, 0, binaryCircle5x5Offset, 5, 5, dilateDataDevice);
+				display = dilation;
 				break;
 			default:
 				break;
 			}
 		}
-			
-	
+
+
 
 
 		if (display.size().height > 0) {
@@ -210,10 +279,12 @@ int main() {
 
 		if (keypress == 27) break;
 	}
-
 	cudaFreeHost(greyscale1.data);
 	cudaFreeHost(greyscale2.data);
 	cudaFreeHost(backgroundGreyscale.data);
+	cudaFreeHost(thresholdImage.data);
+	cudaFreeHost(erosion.data);
+	cudaFreeHost(dilation.data);
 	cudaFreeHost(buffer.data);
 	cudaFreeHost(display.data);
 
@@ -334,6 +405,109 @@ __global__ void subtractImages(unsigned char *img1, unsigned char *img2, int wid
 	}
 	else {
 		destination[(y * width) + x] = 0.0f;
+	}
+}
+
+
+void erodeFilterWrapper(dim3 blocks, dim3 threads, unsigned char *source, int width, int height, int paddingX, int paddingY, size_t kOffset, int kWidth, int kHeight, unsigned char *destination) {
+#if TIME_GPU
+	cudaEventRecord(start);
+#endif
+
+	erodeFilter << <blocks, threads >> > (source, width, height, paddingX, paddingY, kOffset, kWidth, kHeight, destination);
+	cudaDeviceSynchronize();
+
+#if TIME_GPU
+	cudaEventRecord(stop);
+	float ms = 0.0f;
+	cudaEventSynchronize(stop);
+	cudaEventElapsedTime(&ms, start, stop);
+	std::cout << "Elapsed GPU time: " << ms << " milliseconds" << std::endl;
+#endif
+}
+__global__ void erodeFilter(unsigned char *source, int width, int height, int paddingX, int paddingY, size_t kOffset, int kWidth, int kHeight, unsigned char *destination)
+{
+	int x = (blockIdx.x * blockDim.x) + threadIdx.x;
+	int y = (blockIdx.y * blockDim.y) + threadIdx.y;
+
+	bool erode = false;
+	int pWidth = kWidth / 2;
+	int pHeight = kHeight / 2;
+
+	// Only execute for valid pixels
+	if (x >= pWidth + paddingX &&
+		y >= pHeight + paddingY &&
+		x < (blockDim.x * gridDim.x) - pWidth - paddingX &&
+		y < (blockDim.y * gridDim.y) - pHeight - paddingY)
+	{
+		for (int j = -pHeight; j <= pHeight && !erode; j++)
+		{
+			for (int i = -pWidth; i <= pWidth && !erode; i++)
+			{
+				// Sample the weight for this location
+				int ki = (i + pWidth);
+				int kj = (j + pHeight);
+				bool w = (structuringElementStore[(kj * kWidth) + ki + kOffset] > 0);
+				if (w)
+				{
+					erode = !(source[((y + j) * width) + (x + i)] > 0);
+				}
+			}
+		}
+	}
+
+	destination[(y * width) + x] = (erode) ? 0 : 255;
+}
+
+void dilateFilterWrapper(dim3 blocks, dim3 threads, unsigned char *source, int width, int height, int paddingX, int paddingY, size_t kOffset, int kWidth, int kHeight, unsigned char *destination) {
+#if TIME_GPU
+	cudaEventRecord(start);
+#endif
+
+	dilateFilter << <blocks, threads >> > (source, width, height, paddingX, paddingY, kOffset, kWidth, kHeight, destination);
+	cudaDeviceSynchronize();
+
+#if TIME_GPU
+	cudaEventRecord(stop);
+	float ms = 0.0f;
+	cudaEventSynchronize(stop);
+	cudaEventElapsedTime(&ms, start, stop);
+	std::cout << "Elapsed GPU time: " << ms << " milliseconds" << std::endl;
+#endif
+}
+__global__ void dilateFilter(unsigned char *source, int width, int height, int paddingX, int paddingY, size_t kOffset, int kWidth, int kHeight, unsigned char *destination)
+{
+	int x = (blockIdx.x * blockDim.x) + threadIdx.x;
+	int y = (blockIdx.y * blockDim.y) + threadIdx.y;
+
+	int pWidth = kWidth / 2;
+	int pHeight = kHeight / 2;
+
+	// Only execute for valid pixels
+	if (x >= pWidth + paddingX &&
+		y >= pHeight + paddingY &&
+		x < (blockDim.x * gridDim.x) - pWidth - paddingX &&
+		y < (blockDim.y * gridDim.y) - pHeight - paddingY)
+	{
+		// is this pixel on?
+		if (source[(y * width) + x] > 0)
+		{
+			// Dilate!!!
+			for (int j = -pHeight; j <= pHeight; j++)
+			{
+				for (int i = -pWidth; i <= pWidth; i++)
+				{
+					// Sample the weight for this location
+					int ki = (i + pWidth);
+					int kj = (j + pHeight);
+					bool w = (structuringElementStore[(kj * kWidth) + ki + kOffset] > 0);
+					if (w)
+					{
+						source[((y + j) * width) + (x + i)] = (w) ? 255 : 0;
+					}
+				}
+			}
+		}
 	}
 }
 
