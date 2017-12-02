@@ -4,6 +4,8 @@
 Credit and thanks to https://github.com/Teknoman117/cuda/blob/master/imgproc_example/main.cu
 */
 
+#define TIME_GPU 1
+
 #include <stdlib.h>
 #include <stddef.h>
 #include <stdio.h>
@@ -18,12 +20,21 @@ Credit and thanks to https://github.com/Teknoman117/cuda/blob/master/imgproc_exa
 #include "opencv2/highgui.hpp"
 #include "opencv2/imgproc.hpp"
 
+#if TIME_GPU
+cudaEvent_t start, stop;
+#endif
+
 __constant__ float convolutionKernelStore[256];
 
-void captureBackgroundImage();
 unsigned char *createImageBuffer(unsigned int bytes, unsigned char **devicePtr);
+
+void pythagorasWrapper(dim3 blocks, dim3 threads, unsigned char *a, unsigned char *b, unsigned char *c);
 __global__ void pythagoras(unsigned char *a, unsigned char *b, unsigned char *c);
+
+void convolveWrapper(dim3 blocks, dim3 threads, unsigned char *source, int width, int height, int paddingX, int paddingY, size_t kOffset, int kWidth, int kHeight, unsigned char *destination);
 __global__ void convolve(unsigned char *source, int width, int height, int paddingX, int paddingY, size_t kOffset, int kWidth, int kHeight, unsigned char *destination);
+
+void subtractImagesWrapper(dim3 blocks, dim3 threads, unsigned char *img1, unsigned char *img2, int width, int height, float threshold, unsigned char *destination);
 __global__ void subtractImages(unsigned char *img1, unsigned char *img2, int width, int height, float threshold, unsigned char *destination);
 
 void handleKeypress();
@@ -44,7 +55,7 @@ cv::VideoCapture camera_usb(2);
 cv::VideoCapture activeCamera = camera_front;
 
 int activeProcessing = 0; /* 0 = Use the GPU. 1 = Use the CPU */
-float threshold = 100;
+float threshold = 50;
 
 int main() {
 	if (!camera_front.isOpened()) {
@@ -62,10 +73,10 @@ int main() {
 	cv::Mat background;
 	int backgroundSet = 0;
 
-	cudaEvent_t start, stop;
+#if TIME_GPU
 	cudaEventCreate(&start);
 	cudaEventCreate(&stop);
-
+#endif
 	const float gaussianKernel[25] =
 	{
 		2.f / 159.f,  4.f / 159.f,  5.f / 159.f,  4.f / 159.f, 2.f / 159.f,
@@ -152,7 +163,6 @@ int main() {
 			dim3 cthreads(16, 16);
 			dim3 pblocks(frame.size().width * frame.size().height / 256);
 			dim3 pthreads(256, 1);
-			cudaEventRecord(start);
 			{
 				switch (activeOperation) {
 				case Normal:
@@ -162,12 +172,12 @@ int main() {
 					display = greyscale;
 					break;
 				case Subtraction:	
-					subtractImages << <cblocks, cthreads >> > (greyscale.data, greyscalePrev.data, frame.size().width, frame.size().height, threshold, bufferDataDevice);
+					subtractImagesWrapper(cblocks, cthreads, greyscale.data, greyscalePrev.data, frame.size().width, frame.size().height, threshold, bufferDataDevice);
 					display = buffer;
 					break;
 				case Background:
 					if (backgroundSet) {
-						subtractImages << <cblocks, cthreads >> > (greyscale.data, backgroundGreyscale.data, frame.size().width, frame.size().height, threshold, bufferDataDevice);
+						subtractImagesWrapper(cblocks, cthreads, greyscale.data, backgroundGreyscale.data, frame.size().width, frame.size().height, threshold, bufferDataDevice);
 						display = buffer;
 					}
 					else {
@@ -186,11 +196,7 @@ int main() {
 				}
 				cudaDeviceSynchronize();
 			}
-			cudaEventRecord(stop);
-			float ms = 0.0f;
-			cudaEventSynchronize(stop);
-			cudaEventElapsedTime(&ms, start, stop);
-			std::cout << "Elapsed GPU time: " << ms << " milliseconds" << std::endl;
+			
 		}
 
 
@@ -217,10 +223,6 @@ int main() {
 	return 0;
 }
 
-void captureBackgroundImage() {
-
-}
-
 unsigned char *createImageBuffer(unsigned int bytes, unsigned char **devicePtr) {
 
 	unsigned char *ptr = NULL;
@@ -230,6 +232,23 @@ unsigned char *createImageBuffer(unsigned int bytes, unsigned char **devicePtr) 
 	return ptr;
 }
 
+void pythagorasWrapper(dim3 blocks, dim3 threads, unsigned char *a, unsigned char *b, unsigned char *c) {
+#if TIME_GPU
+	cudaEventRecord(start);
+#endif
+
+	pythagoras << <blocks, threads >> >(a, b, c);
+	cudaDeviceSynchronize();
+
+#if TIME_GPU
+	cudaEventRecord(stop);
+	float ms = 0.0f;
+	cudaEventSynchronize(stop);
+	cudaEventElapsedTime(&ms, start, stop);
+	std::cout << "Elapsed GPU time: " << ms << " milliseconds" << std::endl;
+#endif
+
+}
 __global__ void pythagoras(unsigned char *a, unsigned char *b, unsigned char *c)
 {
 	int idx = (blockIdx.x * blockDim.x) + threadIdx.x;
@@ -240,6 +259,23 @@ __global__ void pythagoras(unsigned char *a, unsigned char *b, unsigned char *c)
 	c[idx] = (unsigned char)sqrtf(af*af + bf*bf);
 }
 
+
+void convolveWrapper(dim3 blocks, dim3 threads, unsigned char *source, int width, int height, int paddingX, int paddingY, size_t kOffset, int kWidth, int kHeight, unsigned char *destination) {
+#if TIME_GPU
+	cudaEventRecord(start);
+#endif
+
+	convolve << <blocks, threads >> > (source, width, height, paddingX, paddingY, kOffset, kWidth, kHeight, destination);
+	cudaDeviceSynchronize();
+
+#if TIME_GPU
+	cudaEventRecord(stop);
+	float ms = 0.0f;
+	cudaEventSynchronize(stop);
+	cudaEventElapsedTime(&ms, start, stop);
+	std::cout << "Elapsed GPU time: " << ms << " milliseconds" << std::endl;
+#endif
+}
 __global__ void convolve(unsigned char *source, int width, int height, int paddingX, int paddingY, size_t kOffset, int kWidth, int kHeight, unsigned char *destination) {
 
 	int x = (blockIdx.x * blockDim.x) + threadIdx.x;
@@ -273,6 +309,23 @@ __global__ void convolve(unsigned char *source, int width, int height, int paddi
 	destination[(y * width) + x] = (unsigned char)sum;
 }
 
+
+void subtractImagesWrapper(dim3 blocks, dim3 threads, unsigned char *img1, unsigned char *img2, int width, int height, float threshold, unsigned char *destination) {
+#if TIME_GPU
+	cudaEventRecord(start);
+#endif
+
+	subtractImages << <blocks, threads >> > (img1, img2, width, height, threshold, destination);
+	cudaDeviceSynchronize();
+
+#if TIME_GPU
+	cudaEventRecord(stop);
+	float ms = 0.0f;
+	cudaEventSynchronize(stop);
+	cudaEventElapsedTime(&ms, start, stop);
+	std::cout << "Elapsed GPU time: " << ms << " milliseconds" << std::endl;
+#endif
+}
 __global__ void subtractImages(unsigned char *img1, unsigned char *img2, int width, int height, float threshold, unsigned char *destination) {
 
 	int x = (blockIdx.x * blockDim.x) + threadIdx.x;
@@ -314,6 +367,9 @@ void handleKeypress() {
 	case 119: /* w */
 		activeCamera = camera_back;
 		break;
+	case 101: /* e */
+		activeCamera = camera_usb;
+		break;
 
 	case 122: /* z */
 		activeProcessing = 0;
@@ -331,8 +387,6 @@ void handleKeypress() {
 		std::cout << "\nThreshold = " << threshold << "\n" << std::endl;
 		break;
 
-	case 112: /* p */
-		captureBackgroundImage();
 	default:
 		break;
 	}
@@ -350,6 +404,8 @@ void handleKeypress() {
 Credit and thanks to https://github.com/Teknoman117/cuda/blob/master/imgproc_example/main.cu
 */
 
+#define TIME_GPU 1
+
 #include <stdlib.h>
 #include <stddef.h>
 #include <stdio.h>
@@ -364,11 +420,20 @@ Credit and thanks to https://github.com/Teknoman117/cuda/blob/master/imgproc_exa
 #include "opencv2/highgui.hpp"
 #include "opencv2/imgproc.hpp"
 
+#if TIME_GPU
+cudaEvent_t start, stop;
+#endif
+
 __constant__ float convolutionKernelStore[256];
 
 unsigned char *createImageBuffer(unsigned int bytes, unsigned char **devicePtr);
+
+void pythagorasWrapper(dim3 blocks, dim3 threads, unsigned char *a, unsigned char *b, unsigned char *c);
 __global__ void pythagoras(unsigned char *a, unsigned char *b, unsigned char *c);
+
+void convolveWrapper(dim3 blocks, dim3 threads, unsigned char *source, int width, int height, int paddingX, int paddingY, size_t kOffset, int kWidth, int kHeight, unsigned char *destination);
 __global__ void convolve(unsigned char *source, int width, int height, int paddingX, int paddingY, size_t kOffset, int kWidth, int kHeight, unsigned char *destination);
+
 void pythagoras_slow(unsigned char *a, unsigned char *b, unsigned char *c, int width, int height);
 void convolve_slow(unsigned char *source, int width, int height, int paddingX, int paddingY, size_t kOffset, int kWidth, int kHeight, const float *kernel, unsigned char *destination);
 
@@ -395,9 +460,10 @@ int main() {
 	if ((!camera_front.isOpened()) || (!camera_back.isOpened()))
 		return -1;
 
-	cudaEvent_t start, stop;
+#if TIME_GPU
 	cudaEventCreate(&start);
 	cudaEventCreate(&stop);
+#endif
 
 	clock_t start_clock, end_clock;
 	double cpu_time_used;
@@ -480,7 +546,6 @@ int main() {
 			dim3 cthreads(16, 16);
 			dim3 pblocks(frame.size().width * frame.size().height / 256);
 			dim3 pthreads(256, 1);
-			cudaEventRecord(start);
 			{
 				switch (activeKernel) {
 				case Normal:
@@ -490,22 +555,22 @@ int main() {
 					display = greyscale;
 					break;
 				case Blurred:
-					convolve << <cblocks, cthreads >> > (greyscaleDataDevice, frame.size().width, frame.size().height, 0, 0, gaussianKernelOffset, 5, 5, blurredDataDevice);
+					convolveWrapper(cblocks, cthreads, greyscaleDataDevice, frame.size().width, frame.size().height, 0, 0, gaussianKernelOffset, 5, 5, blurredDataDevice);
 					display = blurred;
 					break;
 				case Embossed:
-					convolve << <cblocks, cthreads >> > (greyscaleDataDevice, frame.size().width, frame.size().height, 0, 0, embossKernelOffset, 3, 3, embossedDataDevice);
+					convolveWrapper(cblocks, cthreads, greyscaleDataDevice, frame.size().width, frame.size().height, 0, 0, embossKernelOffset, 3, 3, embossedDataDevice);
 					display = embossed;
 					break;
 				case Outline:
-					convolve << <cblocks, cthreads >> > (greyscaleDataDevice, frame.size().width, frame.size().height, 0, 0, outlineKernelOffset, 3, 3, outlineDataDevice);
+					convolveWrapper(cblocks, cthreads, greyscaleDataDevice, frame.size().width, frame.size().height, 0, 0, outlineKernelOffset, 3, 3, outlineDataDevice);
 					display = outline;
 					break;
 				case Sobel:
-					convolve << <cblocks, cthreads >> > (greyscaleDataDevice, frame.size().width, frame.size().height, 0, 0, gaussianKernelOffset, 5, 5, blurredDataDevice);
-					convolve << <cblocks, cthreads >> > (blurredDataDevice, frame.size().width, frame.size().height, 0, 0, leftSobelKernelOffset, 3, 3, leftSobelDataDevice);
-					convolve << <cblocks, cthreads >> > (blurredDataDevice, frame.size().width, frame.size().height, 0, 0, topSobelKernelOffset, 3, 3, topSobelDataDevice);
-					pythagoras << <pblocks, pthreads >> >(leftSobelDataDevice, topSobelDataDevice, sobelDataDevice);
+					convolveWrapper(cblocks, cthreads, greyscaleDataDevice, frame.size().width, frame.size().height, 0, 0, gaussianKernelOffset, 5, 5, blurredDataDevice);
+					convolveWrapper(cblocks, cthreads, blurredDataDevice, frame.size().width, frame.size().height, 0, 0, leftSobelKernelOffset, 3, 3, leftSobelDataDevice);
+					convolveWrapper(cblocks, cthreads, blurredDataDevice, frame.size().width, frame.size().height, 0, 0, topSobelKernelOffset, 3, 3, topSobelDataDevice);
+					pythagorasWrapper(pblocks, pthreads, leftSobelDataDevice, topSobelDataDevice, sobelDataDevice);
 					display = sobel;
 					break;
 				default:
@@ -513,11 +578,6 @@ int main() {
 				}
 				cudaDeviceSynchronize();
 			}
-			cudaEventRecord(stop);
-			float ms = 0.0f;
-			cudaEventSynchronize(stop);
-			cudaEventElapsedTime(&ms, start, stop);
-			std::cout << "Elapsed GPU time: " << ms << " milliseconds" << std::endl;
 		}
 		else if (activeProcessing == 1) {
 			start_clock = clock();
@@ -588,6 +648,23 @@ unsigned char *createImageBuffer(unsigned int bytes, unsigned char **devicePtr) 
 	return ptr;
 }
 
+void pythagorasWrapper(dim3 blocks, dim3 threads, unsigned char *a, unsigned char *b, unsigned char *c) {
+#if TIME_GPU
+	cudaEventRecord(start);
+#endif
+
+	pythagoras << <blocks, threads >> >(a, b, c);
+	cudaDeviceSynchronize();
+
+#if TIME_GPU
+	cudaEventRecord(stop);
+	float ms = 0.0f;
+	cudaEventSynchronize(stop);
+	cudaEventElapsedTime(&ms, start, stop);
+	std::cout << "Elapsed GPU time: " << ms << " milliseconds" << std::endl;
+#endif
+
+}
 __global__ void pythagoras(unsigned char *a, unsigned char *b, unsigned char *c)
 {
 	int idx = (blockIdx.x * blockDim.x) + threadIdx.x;
@@ -598,19 +675,23 @@ __global__ void pythagoras(unsigned char *a, unsigned char *b, unsigned char *c)
 	c[idx] = (unsigned char)sqrtf(af*af + bf*bf);
 }
 
-void pythagoras_slow(unsigned char *a, unsigned char *b, unsigned char *c, int width, int height)
-{
-	for (int i = 0; i < width * height; i++) {
 
-		float af = float(a[i]);
-		float bf = float(b[i]);
-		c[i] = (unsigned char)sqrtf(af*af + bf*bf);
-	}
+void convolveWrapper(dim3 blocks, dim3 threads, unsigned char *source, int width, int height, int paddingX, int paddingY, size_t kOffset, int kWidth, int kHeight, unsigned char *destination) {
+#if TIME_GPU
+	cudaEventRecord(start);
+#endif
 
+	convolve << <blocks, threads >> > (source, width, height, paddingX, paddingY, kOffset, kWidth, kHeight, destination);
+	cudaDeviceSynchronize();
+
+#if TIME_GPU
+	cudaEventRecord(stop);
+	float ms = 0.0f;
+	cudaEventSynchronize(stop);
+	cudaEventElapsedTime(&ms, start, stop);
+	std::cout << "Elapsed GPU time: " << ms << " milliseconds" << std::endl;
+#endif
 }
-
-
-
 __global__ void convolve(unsigned char *source, int width, int height, int paddingX, int paddingY, size_t kOffset, int kWidth, int kHeight, unsigned char *destination) {
 
 	int x = (blockIdx.x * blockDim.x) + threadIdx.x;
@@ -642,7 +723,17 @@ __global__ void convolve(unsigned char *source, int width, int height, int paddi
 	}
 
 	destination[(y * width) + x] = (unsigned char)sum;
+}
 
+
+void pythagoras_slow(unsigned char *a, unsigned char *b, unsigned char *c, int width, int height)
+{
+	for (int i = 0; i < width * height; i++) {
+
+		float af = float(a[i]);
+		float bf = float(b[i]);
+		c[i] = (unsigned char)sqrtf(af*af + bf*bf);
+	}
 
 }
 
