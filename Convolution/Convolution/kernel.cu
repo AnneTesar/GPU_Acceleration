@@ -181,6 +181,7 @@ int main() {
 	unsigned char *greyscaleDataDevice2,
 		*greyscaleDataDevice1,
 		*backgroundGreyscaleDataDevice,
+		*backgroundGreyscaleBlurredDataDevice,
 		*thresholdDataDevice,
 		*erosionDataDevice,
 		*dilationDataDevice,
@@ -191,6 +192,7 @@ int main() {
 	cv::Mat greyscale1(frame.size(), CV_8U, createImageBuffer(frame.size().width * frame.size().height, &greyscaleDataDevice1));
 	cv::Mat greyscale2(frame.size(), CV_8U, createImageBuffer(frame.size().width * frame.size().height, &greyscaleDataDevice2));
 	cv::Mat backgroundGreyscale(frame.size(), CV_8U, createImageBuffer(frame.size().width * frame.size().height, &backgroundGreyscaleDataDevice));
+	cv::Mat backgroundGreyscaleBlurred(frame.size(), CV_8U, createImageBuffer(frame.size().width * frame.size().height, &backgroundGreyscaleBlurredDataDevice));
 	cv::Mat thresholdImage(frame.size(), CV_8U, createImageBuffer(frame.size().width * frame.size().height, &thresholdDataDevice));
 	cv::Mat erosion(frame.size(), CV_8U, createImageBuffer(frame.size().width * frame.size().height, &erosionDataDevice));
 	cv::Mat dilation(frame.size(), CV_8U, createImageBuffer(frame.size().width * frame.size().height, &dilationDataDevice));
@@ -261,11 +263,11 @@ int main() {
 				break;
 			case Background:
 				if (backgroundSet) {
-					subtractImagesWrapper(cblocks, cthreads, greyscale.data, backgroundGreyscale.data, frame.size().width, frame.size().height, threshold, bufferDataDevice);
+					convolveWrapper(cblocks, cthreads, greyscale.data, frame.size().width, frame.size().height, 0, 0, gaussianKernelOffset, 5, 5, bufferDataDevice);
+
+					subtractImagesWrapper(cblocks, cthreads, bufferDataDevice, backgroundGreyscaleBlurred.data, frame.size().width, frame.size().height, threshold, thresholdDataDevice);
 					
-					detector->detect(buffer, keypoints);
-					cv::Mat image_with_keypoints;
-					cv::drawKeypoints(buffer, keypoints, image_with_keypoints, cv::Scalar(0, 0, 255), cv::DrawMatchesFlags::DRAW_RICH_KEYPOINTS);
+					detector->detect(thresholdImage, keypoints);
 					if (keypoints.size() > 1) {
 						std::cout << "more than one keypoint found" << std::endl;
 					}
@@ -273,8 +275,7 @@ int main() {
 						std::cout << "just one keypoint found - " << keypoints[0].pt << std::endl;
 
 						cv::Point centerPoint = keypoints[0].pt;
-						
-
+					
 						int left = floor(centerPoint.x) - ballTemplateCropRadius;
 						if (left < 0) left = 0;
 						int right = floor(centerPoint.x) + ballTemplateCropRadius;
@@ -285,7 +286,7 @@ int main() {
 						if (bottom > frame.size().height - 1) bottom = frame.size().height - 1;
 
 						cv::Mat part(
-							buffer,
+							thresholdImage,
 							cv::Range(top, bottom),
 							cv::Range(left, right));
 						ballTemplateBuffer = part;
@@ -301,13 +302,14 @@ int main() {
 						std::cout << "nothing found - " << std::endl;
 					}
 
-					display = buffer;
+					display = thresholdImage;
 				}
 				else {
 					std::cout << "Take Background Picture by pressing 'p' " << std::endl;
 					while (1) if (cv::waitKey(1) == 112) break;
 					activeCamera >> background;
 					cv::cvtColor(background, backgroundGreyscale, CV_BGR2GRAY);
+					convolveWrapper(cblocks, cthreads, backgroundGreyscale.data, frame.size().width, frame.size().height, 0, 0, gaussianKernelOffset, 5, 5, backgroundGreyscaleBlurredDataDevice);
 					backgroundSet = 1;
 				}
 				break;
@@ -342,6 +344,7 @@ int main() {
 	cudaFreeHost(greyscale1.data);
 	cudaFreeHost(greyscale2.data);
 	cudaFreeHost(backgroundGreyscale.data);
+	cudaFreeHost(backgroundGreyscaleBlurred.data);
 	cudaFreeHost(thresholdImage.data);
 	cudaFreeHost(erosion.data);
 	cudaFreeHost(dilation.data);
