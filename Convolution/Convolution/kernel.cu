@@ -181,7 +181,7 @@ int main() {
 		*backgroundGreyscaleDataDevice,
 		*thresholdDataDevice,
 		*erosionDataDevice,
-		*dilateDataDevice,
+		*dilationDataDevice,
 		*bufferDataDevice,
 		*displayDataDevice;
 	cv::Mat greyscale1(frame.size(), CV_8U, createImageBuffer(frame.size().width * frame.size().height, &greyscaleDataDevice1));
@@ -189,7 +189,7 @@ int main() {
 	cv::Mat backgroundGreyscale(frame.size(), CV_8U, createImageBuffer(frame.size().width * frame.size().height, &backgroundGreyscaleDataDevice));
 	cv::Mat thresholdImage(frame.size(), CV_8U, createImageBuffer(frame.size().width * frame.size().height, &thresholdDataDevice));
 	cv::Mat erosion(frame.size(), CV_8U, createImageBuffer(frame.size().width * frame.size().height, &erosionDataDevice));
-	cv::Mat dilation(frame.size(), CV_8U, createImageBuffer(frame.size().width * frame.size().height, &dilateDataDevice));
+	cv::Mat dilation(frame.size(), CV_8U, createImageBuffer(frame.size().width * frame.size().height, &dilationDataDevice));
 	cv::Mat buffer(frame.size(), CV_8U, createImageBuffer(frame.size().width * frame.size().height, &bufferDataDevice));
 	cv::Mat display(frame.size(), CV_8U, createImageBuffer(frame.size().width * frame.size().height, &displayDataDevice));
 	cv::Mat greyscale, greyscalePrev;
@@ -253,10 +253,10 @@ int main() {
 				break;
 			case Tracking:
 //				display = thresholdImage;
-//				erodeFilterWrapper(cblocks, cthreads, thresholdDataDevice, frame.size().width, frame.size().height, 0, 0, binaryCircle5x5Offset, 5, 5, erosionDataDevice);
-//				display = erosion;
-				dilateFilterWrapper(cblocks, cthreads, thresholdDataDevice, frame.size().width, frame.size().height, 0, 0, binaryCircle5x5Offset, 5, 5, dilateDataDevice);
-				display = dilation;
+				erodeFilterWrapper(cblocks, cthreads, thresholdDataDevice, frame.size().width, frame.size().height, 0, 0, binaryCircle5x5Offset, 5, 5, erosionDataDevice);
+				dilateFilterWrapper(cblocks, cthreads, erosionDataDevice, frame.size().width, frame.size().height, 0, 0, binaryCircle5x5Offset, 5, 5, thresholdDataDevice);
+				dilateFilterWrapper(cblocks, cthreads, thresholdDataDevice, frame.size().width, frame.size().height, 0, 0, binaryCircle5x5Offset, 5, 5, erosionDataDevice);
+				display = erosion;
 				break;
 			default:
 				break;
@@ -497,13 +497,11 @@ __global__ void dilateFilter(unsigned char *source, int width, int height, int p
 			{
 				for (int i = -pWidth; i <= pWidth; i++)
 				{
-					// Sample the weight for this location
 					int ki = (i + pWidth);
 					int kj = (j + pHeight);
-					bool w = (structuringElementStore[(kj * kWidth) + ki + kOffset] > 0);
-					if (w)
+					if (structuringElementStore[(kj * kWidth) + ki + kOffset] > 0)
 					{
-						source[((y + j) * width) + (x + i)] = (w) ? 255 : 0;
+						destination[((y + j) * width) + (x + i)] = 255;
 					}
 				}
 			}
