@@ -266,19 +266,24 @@ int main() {
 				break;
 			case Background:
 				if (backgroundSet) {
+					// blur
 					convolveWrapper(cblocks, cthreads, greyscale.data, frame.size().width, frame.size().height, 0, 0, gaussianKernelOffset, 5, 5, bufferDataDevice);
-
+					// background subtraction
 					subtractImagesWrapper(cblocks, cthreads, bufferDataDevice, backgroundGreyscaleBlurred.data, frame.size().width, frame.size().height, threshold, thresholdDataDevice);
+					// small erode to remove noise
+					erodeFilterWrapper(cblocks, cthreads, thresholdDataDevice, frame.size().width, frame.size().height, 0, 0, binaryCircle5x5Offset, 5, 5, erosionDataDevice);
 					
+					// blob detector
 					detector->detect(thresholdImage, keypoints);
+					// ignore if multiple blobs found
 					if (keypoints.size() > 1) {
 						std::cout << "more than one keypoint found" << std::endl;
 					}
 					else if (keypoints.size() == 1) {
 						std::cout << "just one keypoint found - " << keypoints[0].pt << std::endl;
-
+						// grab the center
 						cv::Point centerPoint = keypoints[0].pt;
-					
+						// pick bounds for blob template
 						int left = floor(centerPoint.x) - ballTemplateCropRadius;
 						if (left < 0) left = 0;
 						int right = floor(centerPoint.x) + ballTemplateCropRadius;
@@ -287,7 +292,7 @@ int main() {
 						if (top < 0) top = 0;
 						int bottom = floor(centerPoint.y) + ballTemplateCropRadius;
 						if (bottom > frame.size().height - 1) bottom = frame.size().height - 1;
-
+						// build the template
 						cv::Mat part(
 							thresholdImage,
 							cv::Range(top, bottom),
