@@ -5,7 +5,7 @@ Credit and thanks to https://github.com/Teknoman117/cuda/blob/master/imgproc_exa
 */
 
 // GPU benchmark control
-#define TIME_GPU 1
+#define TIME_GPU 0
 
 #include <stdlib.h>
 #include <stddef.h>
@@ -20,6 +20,7 @@ Credit and thanks to https://github.com/Teknoman117/cuda/blob/master/imgproc_exa
 #include "opencv2/core.hpp"
 #include "opencv2/highgui.hpp"
 #include "opencv2/imgproc.hpp"
+#include "opencv2/features2d.hpp"
 
 #if TIME_GPU
 cudaEvent_t start, stop;
@@ -80,6 +81,7 @@ int main() {
 	cv::Mat frame;
 	cv::Mat background;
 	int backgroundSet = 0;
+
 
 #if TIME_GPU
 	cudaEventCreate(&start);
@@ -182,6 +184,8 @@ int main() {
 		*thresholdDataDevice,
 		*erosionDataDevice,
 		*dilationDataDevice,
+		*ballTemplateDataDevice,
+		*ballTemplateBufferDataDevice,
 		*bufferDataDevice,
 		*displayDataDevice;
 	cv::Mat greyscale1(frame.size(), CV_8U, createImageBuffer(frame.size().width * frame.size().height, &greyscaleDataDevice1));
@@ -192,6 +196,13 @@ int main() {
 	cv::Mat dilation(frame.size(), CV_8U, createImageBuffer(frame.size().width * frame.size().height, &dilationDataDevice));
 	cv::Mat buffer(frame.size(), CV_8U, createImageBuffer(frame.size().width * frame.size().height, &bufferDataDevice));
 	cv::Mat display(frame.size(), CV_8U, createImageBuffer(frame.size().width * frame.size().height, &displayDataDevice));
+
+	int ballTemplateCropRadius = 50;
+	cv::Size ballTemplateSize((ballTemplateCropRadius * 2) + 1, (ballTemplateCropRadius * 2) + 1);
+	cv::Mat ballTemplate(ballTemplateSize, CV_8U, createImageBuffer(ballTemplateSize.width * ballTemplateSize.height, &ballTemplateDataDevice));
+	cv::Mat ballTemplateBuffer(ballTemplateSize, CV_8U, createImageBuffer(ballTemplateSize.width * ballTemplateSize.height, &ballTemplateBufferDataDevice));
+
+
 	cv::Mat greyscale, greyscalePrev;
 	cv::Mat hsvimage;
 
@@ -201,6 +212,16 @@ int main() {
 
 	int greyscaleState = 1;
 	int keypressCur;
+
+	cv::SimpleBlobDetector::Params params;
+	params.filterByArea = true;
+	params.minArea = 5.0;        
+	params.maxArea = 80.0;
+	//params.filterByCircularity = true;
+	//params.minCircularity = .8;
+	cv::Ptr<cv::SimpleBlobDetector> detector = cv::SimpleBlobDetector::create(params);
+	std::vector<cv::KeyPoint> keypoints;
+
 
 	while (1) {
 		activeCamera >> frame;
@@ -241,6 +262,45 @@ int main() {
 			case Background:
 				if (backgroundSet) {
 					subtractImagesWrapper(cblocks, cthreads, greyscale.data, backgroundGreyscale.data, frame.size().width, frame.size().height, threshold, bufferDataDevice);
+					
+					detector->detect(buffer, keypoints);
+					cv::Mat image_with_keypoints;
+					cv::drawKeypoints(buffer, keypoints, image_with_keypoints, cv::Scalar(0, 0, 255), cv::DrawMatchesFlags::DRAW_RICH_KEYPOINTS);
+					if (keypoints.size() > 1) {
+						std::cout << "more than one keypoint found" << std::endl;
+					}
+					else if (keypoints.size() == 1) {
+						std::cout << "just one keypoint found - " << keypoints[0].pt << std::endl;
+
+						cv::Point centerPoint = keypoints[0].pt;
+						
+
+						int left = floor(centerPoint.x) - ballTemplateCropRadius;
+						if (left < 0) left = 0;
+						int right = floor(centerPoint.x) + ballTemplateCropRadius;
+						if (right > frame.size().width - 1) right = frame.size().width - 1;
+						int top = floor(centerPoint.y) - ballTemplateCropRadius;
+						if (top < 0) top = 0;
+						int bottom = floor(centerPoint.y) + ballTemplateCropRadius;
+						if (bottom > frame.size().height - 1) bottom = frame.size().height - 1;
+
+						cv::Mat part(
+							buffer,
+							cv::Range(top, bottom),
+							cv::Range(left, right));
+						ballTemplateBuffer = part;
+
+						//dilateFilterWrapper(cblocks, cthreads, ballTemplateBufferDataDevice, ballTemplateBuffer.size().width, ballTemplateBuffer.size().height, 0, 0, binaryCircle5x5Offset, 5, 5, ballTemplateDataDevice);
+						//cv::imshow("Template", ballTemplate);
+						cv::imshow("Template Buffer", ballTemplateBuffer);
+
+
+						cv::circle(buffer, keypoints[0].pt, 40, cv::Scalar(255, 0, 0), 2);
+					}
+					else {
+						std::cout << "nothing found - " << std::endl;
+					}
+
 					display = buffer;
 				}
 				else {
@@ -285,6 +345,8 @@ int main() {
 	cudaFreeHost(thresholdImage.data);
 	cudaFreeHost(erosion.data);
 	cudaFreeHost(dilation.data);
+	cudaFreeHost(ballTemplate.data);
+	cudaFreeHost(ballTemplateBuffer.data);
 	cudaFreeHost(buffer.data);
 	cudaFreeHost(display.data);
 
