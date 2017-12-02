@@ -48,8 +48,11 @@ __global__ void erodeFilter(unsigned char *source, int width, int height, int pa
 void dilateFilterWrapper(dim3 blocks, dim3 threads, unsigned char *source, int width, int height, int paddingX, int paddingY, size_t kOffset, int kWidth, int kHeight, unsigned char *destination);
 __global__ void dilateFilter(unsigned char *source, int width, int height, int paddingX, int paddingY, size_t kOffset, int kWidth, int kHeight, unsigned char *destination);
 
-void handleKeypress();
+void handleKeypress(cv::Mat frame);
 int keypress;
+int recording, videoName = 1;
+
+cv::VideoWriter oVideoWriter;
 
 enum Operations {
 	Normal,
@@ -81,7 +84,7 @@ int main() {
 	cv::Mat frame;
 	cv::Mat background;
 	int backgroundSet = 0;
-
+	recording = 0;
 
 #if TIME_GPU
 	cudaEventCreate(&start);
@@ -325,7 +328,8 @@ int main() {
 			}
 		}
 
-
+		if (recording)
+			oVideoWriter.write(display);
 
 
 		if (display.size().height > 0) {
@@ -336,7 +340,7 @@ int main() {
 		keypressCur = cv::waitKey(1);
 		if (keypressCur < 255) {
 			keypress = keypressCur;
-			handleKeypress();
+			handleKeypress(frame);
 		}
 
 		if (keypress == 27) break;
@@ -352,6 +356,8 @@ int main() {
 	cudaFreeHost(ballTemplateBuffer.data);
 	cudaFreeHost(buffer.data);
 	cudaFreeHost(display.data);
+
+	oVideoWriter.release();
 
 	return 0;
 }
@@ -574,8 +580,7 @@ __global__ void dilateFilter(unsigned char *source, int width, int height, int p
 	}
 }
 
-void handleKeypress() {
-
+void handleKeypress(cv::Mat frame) {
 	switch (keypress) {
 	case 97: /* a */
 		activeOperation = Normal;
@@ -614,6 +619,14 @@ void handleKeypress() {
 		std::cout << "\nThreshold = " << threshold << "\n" << std::endl;
 		break;
 
+	case 109: /* m */
+		oVideoWriter.open(std::to_string(videoName) + ".avi", CV_FOURCC('I', 'Y', 'U', 'V'), 20, frame.size(), true);
+		recording = 1;
+		videoName++;
+		break;
+	case 110: /* n */
+		recording = 0;
+		break;
 	default:
 		break;
 	}
