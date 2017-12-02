@@ -270,11 +270,13 @@ int main() {
 					convolveWrapper(cblocks, cthreads, greyscale.data, frame.size().width, frame.size().height, 0, 0, gaussianKernelOffset, 5, 5, bufferDataDevice);
 					// background subtraction
 					subtractImagesWrapper(cblocks, cthreads, bufferDataDevice, backgroundGreyscaleBlurred.data, frame.size().width, frame.size().height, threshold, thresholdDataDevice);
-					// small erode to remove noise
-					erodeFilterWrapper(cblocks, cthreads, thresholdDataDevice, frame.size().width, frame.size().height, 0, 0, binaryCircle5x5Offset, 5, 5, erosionDataDevice);
+					// erode to remove noise
+					erodeFilterWrapper(cblocks, cthreads, thresholdDataDevice, frame.size().width, frame.size().height, 0, 0, binaryCircle7x7Offset, 7, 7, erosionDataDevice);
+					// dilate
+					dilateFilterWrapper(cblocks, cthreads, erosionDataDevice, frame.size().width, frame.size().height, 0, 0, binaryCircle7x7Offset, 7, 7, dilationDataDevice);
 					
 					// blob detector
-					detector->detect(thresholdImage, keypoints);
+					detector->detect(dilation, keypoints);
 					// ignore if multiple blobs found
 					if (keypoints.size() > 1) {
 						std::cout << "more than one keypoint found" << std::endl;
@@ -310,7 +312,7 @@ int main() {
 						std::cout << "nothing found - " << std::endl;
 					}
 
-					display = thresholdImage;
+					display = dilation;
 				}
 				else {
 					std::cout << "Take Background Picture by pressing 'p' " << std::endl;
