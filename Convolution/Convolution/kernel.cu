@@ -54,7 +54,6 @@ cv::VideoCapture camera_back(1);
 cv::VideoCapture camera_usb(2);
 cv::VideoCapture activeCamera = camera_front;
 
-int activeProcessing = 0; /* 0 = Use the GPU. 1 = Use the CPU */
 float threshold = 50;
 
 int main() {
@@ -158,46 +157,44 @@ int main() {
 		
 
 
-		if (activeProcessing == 0) {
-			dim3 cblocks(frame.size().width / 16, frame.size().height / 16);
-			dim3 cthreads(16, 16);
-			dim3 pblocks(frame.size().width * frame.size().height / 256);
-			dim3 pthreads(256, 1);
-			{
-				switch (activeOperation) {
-				case Normal:
-					display = frame;
-					break;
-				case Greyscale:
-					display = greyscale;
-					break;
-				case Subtraction:	
-					subtractImagesWrapper(cblocks, cthreads, greyscale.data, greyscalePrev.data, frame.size().width, frame.size().height, threshold, bufferDataDevice);
+		dim3 cblocks(frame.size().width / 16, frame.size().height / 16);
+		dim3 cthreads(16, 16);
+		dim3 pblocks(frame.size().width * frame.size().height / 256);
+		dim3 pthreads(256, 1);
+		{
+			switch (activeOperation) {
+			case Normal:
+				display = frame;
+				break;
+			case Greyscale:
+				display = greyscale;
+				break;
+			case Subtraction:	
+				subtractImagesWrapper(cblocks, cthreads, greyscale.data, greyscalePrev.data, frame.size().width, frame.size().height, threshold, bufferDataDevice);
+				display = buffer;
+				break;
+			case Background:
+				if (backgroundSet) {
+					subtractImagesWrapper(cblocks, cthreads, greyscale.data, backgroundGreyscale.data, frame.size().width, frame.size().height, threshold, bufferDataDevice);
 					display = buffer;
-					break;
-				case Background:
-					if (backgroundSet) {
-						subtractImagesWrapper(cblocks, cthreads, greyscale.data, backgroundGreyscale.data, frame.size().width, frame.size().height, threshold, bufferDataDevice);
-						display = buffer;
-					}
-					else {
-						std::cout << "Take Background Picture by pressing 'p' " << std::endl;
-						while (1) if (cv::waitKey(1) == 112) break;
-						activeCamera >> background;
-						cv::cvtColor(background, backgroundGreyscale, CV_BGR2GRAY);
-						backgroundSet = 1;
-					}
-					break;
-				case Tracking:
-					
-					break;
-				default:
-					break;
 				}
-				cudaDeviceSynchronize();
+				else {
+					std::cout << "Take Background Picture by pressing 'p' " << std::endl;
+					while (1) if (cv::waitKey(1) == 112) break;
+					activeCamera >> background;
+					cv::cvtColor(background, backgroundGreyscale, CV_BGR2GRAY);
+					backgroundSet = 1;
+				}
+				break;
+			case Tracking:
+					
+				break;
+			default:
+				break;
 			}
-			
 		}
+			
+	
 
 
 		if (display.size().height > 0) {
@@ -369,13 +366,6 @@ void handleKeypress() {
 		break;
 	case 101: /* e */
 		activeCamera = camera_usb;
-		break;
-
-	case 122: /* z */
-		activeProcessing = 0;
-		break;
-	case 120: /* x */
-		activeProcessing = 1;
 		break;
 
 	case 116: /* t */
@@ -576,7 +566,6 @@ int main() {
 				default:
 					break;
 				}
-				cudaDeviceSynchronize();
 			}
 		}
 		else if (activeProcessing == 1) {
@@ -633,6 +622,9 @@ int main() {
 	cudaFreeHost(blurred.data);
 	cudaFreeHost(embossed.data);
 	cudaFreeHost(outline.data);
+	cudaFreeHost(leftSobel.data);
+	cudaFreeHost(topSobel.data);
+	cudaFreeHost(sobel.data);
 	cudaFreeHost(display.data);
 
 	return 0;
