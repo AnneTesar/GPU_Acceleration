@@ -30,7 +30,7 @@ Credit and thanks to https://github.com/Teknoman117/cuda/blob/master/imgproc_exa
 
 ////// GPU CONSTANTS
 __constant__ float convolutionKernelStore[256];
-__constant__ unsigned char structuringElementStore[16000];
+__constant__ unsigned char structuringElementStore[256];
 
 ////// PROTOTYPES
 unsigned char *createImageBuffer(unsigned int bytes, unsigned char **devicePtr);
@@ -74,6 +74,9 @@ __global__ void subtractImages(unsigned char *img1, unsigned char *img2, int wid
 
 void erodeFilterWrapper(dim3 blocks, dim3 threads, unsigned char *src, int width, int height, int paddingX, int paddingY, size_t kOffset, int kWidth, int kHeight, unsigned char *dest);
 __global__ void erodeFilter(unsigned char *src, int width, int height, int paddingX, int paddingY, size_t kOffset, int kWidth, int kHeight, unsigned char *dest);
+
+void erodeTemplateFilterWrapper(dim3 blocks, dim3 threads, unsigned char *src, int width, int height, int paddingX, int paddingY, unsigned char *objTemplate, int tWidth, int tHeight, unsigned char *dest);
+__global__ void erodeTemplateFilter(unsigned char *src, int width, int height, int paddingX, int paddingY, unsigned char *objTemplate, int tWidth, int tHeight, unsigned char *dest);
 
 void dilateFilterWrapper(dim3 blocks, dim3 threads, unsigned char *src, int width, int height, int paddingX, int paddingY, size_t kOffset, int kWidth, int kHeight, unsigned char *dest);
 __global__ void dilateFilter(unsigned char *src, int width, int height, int paddingX, int paddingY, size_t kOffset, int kWidth, int kHeight, unsigned char *dest);
@@ -201,25 +204,14 @@ int main() {
 	cudaMemcpyToSymbol(structuringElementStore, binaryCircle7x7, sizeof(binaryCircle7x7), binaryCircle7x7Offset * sizeof(unsigned char));
 	structuringElementStoreEndOffset += sizeof(binaryCircle7x7) / sizeof(unsigned char);
 
-	// object template setup
-	cv::Size objTemplateSize((OBJ_TEMPLATE_WIDTH * 2) + 1, (OBJ_TEMPLATE_HEIGHT * 2) + 1);
-	unsigned char *objTemplate1DataDevice, *objTemplate2DataDevice, *objTemplate3DataDevice, *objTemplate4DataDevice;
-	cv::Mat objTemplate1(objTemplateSize, CV_8U, createImageBuffer(objTemplateSize.width * objTemplateSize.height, &objTemplate1DataDevice));
-	cv::Mat objTemplate2(objTemplateSize, CV_8U, createImageBuffer(objTemplateSize.width * objTemplateSize.height, &objTemplate2DataDevice));
-	cv::Mat objTemplate3(objTemplateSize, CV_8U, createImageBuffer(objTemplateSize.width * objTemplateSize.height, &objTemplate3DataDevice));
-	cv::Mat objTemplate4(objTemplateSize, CV_8U, createImageBuffer(objTemplateSize.width * objTemplateSize.height, &objTemplate4DataDevice));
-	const size_t objTemplate1Offset = structuringElementStoreEndOffset;
-	structuringElementStoreEndOffset += sizeof(objTemplate1.data) / sizeof(unsigned char);
-	const size_t objTemplate2Offset = structuringElementStoreEndOffset;
-	structuringElementStoreEndOffset += sizeof(objTemplate2.data) / sizeof(unsigned char);
-
 	////// VARIABLES
 	int greyscaleState = 1;
 	int keypress, keypressCur;
 	
 	// object hsv thresholds
-	cv::Vec3b lower_hsv = { 0, 0, 200 };
-	cv::Vec3b upper_hsv = { 255, 255, 255 };
+	// blue ball
+	cv::Vec3b lower_hsv = { 88, 109, 0 };
+	cv::Vec3b upper_hsv = { 118, 255, 199 };
 
 	// blob detector parameters
 	cv::SimpleBlobDetector::Params params;
@@ -277,6 +269,13 @@ int main() {
 		greyscale,
 		greyscalePrev,
 		hsvImage;
+	// object template setup
+	cv::Size objTemplateSize((OBJ_TEMPLATE_WIDTH * 2) + 1, (OBJ_TEMPLATE_HEIGHT * 2) + 1);
+	unsigned char *objTemplate1DataDevice, *objTemplate2DataDevice, *objTemplate3DataDevice, *objTemplate4DataDevice;
+	cv::Mat objTemplate1(objTemplateSize, CV_8U, createImageBuffer(objTemplateSize.width * objTemplateSize.height, &objTemplate1DataDevice));
+	cv::Mat objTemplate2(objTemplateSize, CV_8U, createImageBuffer(objTemplateSize.width * objTemplateSize.height, &objTemplate2DataDevice));
+	cv::Mat objTemplate3(objTemplateSize, CV_8U, createImageBuffer(objTemplateSize.width * objTemplateSize.height, &objTemplate3DataDevice));
+	cv::Mat objTemplate4(objTemplateSize, CV_8U, createImageBuffer(objTemplateSize.width * objTemplateSize.height, &objTemplate4DataDevice));
 
 	// GPU settings
 	dim3 cblocks(frame.size().width / 16, frame.size().height / 16);
@@ -329,8 +328,6 @@ int main() {
 					// open to remove noise
 					erodeFilterWrapper(cblocks, cthreads, buffer2.data, frame.size().width, frame.size().height, 0, 0, binaryCircle5x5Offset, 5, 5, buffer1.data);
 					dilateFilterWrapper(cblocks, cthreads, buffer1.data, frame.size().width, frame.size().height, 0, 0, binaryCircle5x5Offset, 5, 5, buffer2.data);
-					//dilateFilterWrapper(cblocks, cthreads, buffer2.data, frame.size().width, frame.size().height, 0, 0, binaryCircle5x5Offset, 5, 5, buffer1.data);
-					//dilateFilterWrapper(cblocks, cthreads, buffer1.data, frame.size().width, frame.size().height, 0, 0, binaryCircle5x5Offset, 5, 5, buffer2.data);
 
 					display = buffer2;
 
@@ -355,37 +352,43 @@ int main() {
 						int bottom = floor(centerPoint.y) + OBJ_TEMPLATE_HEIGHT;
 						if (bottom > frame.size().height - 1) bottom = frame.size().height - 1;
 						// build the template
-						cv::Mat part(
+						/*cv::Mat part(
 							display,
 							cv::Range(top, bottom),
 							cv::Range(left, right));
-						//objTemplate1 = part;
-						//objTemplate2 = part;
-						//memcpy(objTemplate1.data, part.data, objTemplate1.size().width * objTemplate1.size().height);
-						//memcpy(objTemplate2.data, part.data, objTemplate2.size().width * objTemplate2.size().height);
+						objTemplate1 = part;*/
 						manualCopy(display.data, display.size().width, display.size().height, left, top, objTemplate1.data, objTemplate1.size().width, objTemplate1.size().height);
-						// copy the template into the structuring element store
-						cudaMemcpyToSymbol(structuringElementStore, objTemplate1.data, sizeof(objTemplate1.data), objTemplate1Offset * sizeof(unsigned char));
+						//cudaMemcpyToSymbol(structuringElementStore, objTemplate1.data, sizeof(objTemplate1.data), objTemplate1Offset * sizeof(unsigned char));
 						cv::imshow("Template Buffer1", objTemplate1);
 						// build the donut template
 						// dilate to get bigger object
-						dilateFilterWrapper(cblocks, cthreads, objTemplate1.data, objTemplate1.size().width, objTemplate1.size().height, 0, 0, binaryCircle5x5Offset, 5, 5, objTemplate2.data);
+						//dilateFilterWrapper(cblocks, cthreads, objTemplate1.data, objTemplate1.size().width, objTemplate1.size().height, 0, 0, binaryCircle5x5Offset, 5, 5, objTemplate2.data);
 						//cv::imshow("Template Buffer dilate", objTemplate2);
-						dilateFilterWrapper(cblocks, cthreads, objTemplate2.data, objTemplate2.size().width, objTemplate2.size().height, 0, 0, binaryCircle5x5Offset, 5, 5, objTemplate3.data);
-						cv::imshow("Template Buffer dilate2", objTemplate3);
+						//dilateFilterWrapper(cblocks, cthreads, objTemplate2.data, objTemplate2.size().width, objTemplate2.size().height, 0, 0, binaryCircle5x5Offset, 5, 5, objTemplate3.data);
+						//cv::imshow("Template Buffer dilate2", objTemplate3);
 						// invert the original object and AND with bigger to get donut
-						invertBIWrapper(cblocks, cthreads, objTemplate1.data, objTemplate1.size().width, objTemplate1.size().height, objTemplate2.data);
-						cv::imshow("Template Buffer1 inverted", objTemplate2);
-						cv::imshow("Template Buffer1 before and", objTemplate1);
-						logicalAndWrapper(cblocks, cthreads, objTemplate2.data, objTemplate3.data, objTemplate4.data, objTemplate2.size().width, objTemplate2.size().height);
-						cv::imshow("Template Buffer anded", objTemplate4);
+						//invertBIWrapper(cblocks, cthreads, objTemplate1.data, objTemplate1.size().width, objTemplate1.size().height, objTemplate2.data);
+						//cv::imshow("Template Buffer1 inverted", objTemplate2);
+
+						/*for (int y = 0; y < 81; y++)
+						{
+							for (int x = 0; x < 81; x++)
+							{
+								objTemplate4.data[(y*81) + x] = ((objTemplate2.data[(y*81) + x] > 0) && (objTemplate3.data[(y*81) + x] > 0)) ? 255 : 0;
+							}
+						}*/
+						//cv::bitwise_and(objTemplate2, objTemplate3, objTemplate4);
+						//logicalAndWrapper(cblocks, cthreads, objTemplate2.data, objTemplate3.data, objTemplate4.data, objTemplate2.size().width, objTemplate2.size().height);
+						//cv::imshow("Template Buffer anded", objTemplate4);
 						// copy the template into the structuring element store
-						cudaMemcpyToSymbol(structuringElementStore, objTemplate4.data, sizeof(objTemplate4.data), objTemplate2Offset * sizeof(unsigned char));
+						//cudaMemcpyToSymbol(structuringElementStore, objTemplate4.data, sizeof(objTemplate4.data), objTemplate2Offset * sizeof(unsigned char));
 
 						// find the object's color
 						cv::Vec3b colorOfObj = hsvImage.at<cv::Vec3b>(centerPoint);
 						lower_hsv = cv::Vec3b(max(colorOfObj[0] - OBJ_H_RANGE, 0), max(colorOfObj[1] - OBJ_S_RANGE, 0), max(colorOfObj[2] - OBJ_V_RANGE, 0));
 						upper_hsv = cv::Vec3b(min(colorOfObj[0] + OBJ_H_RANGE, 255), min(colorOfObj[1] + OBJ_S_RANGE, 255), min(colorOfObj[2] + OBJ_V_RANGE, 255));
+						std::cout << "lower_hsv - " << lower_hsv << std::endl;
+						std::cout << "upper_hsv - " << upper_hsv << std::endl;
 
 						cv::circle(display, keypoints[0].pt, 40, cv::Scalar(255, 0, 0), 2);
 					}
@@ -408,19 +411,24 @@ int main() {
 				// threshold on object color
 				cv::inRange(hsvImage, lower_hsv, upper_hsv, thresholdImage);
 				// open the image to reduce noise
-				erodeFilterWrapper(cblocks, cthreads, thresholdImage.data, frame.size().width, frame.size().height, 50, 50, binaryCircle5x5Offset, 5, 5, buffer1.data);
-				dilateFilterWrapper(cblocks, cthreads, thresholdImage.data, frame.size().width, frame.size().height, 50, 50, binaryCircle5x5Offset, 5, 5, buffer2.data);
-				dilateFilterWrapper(cblocks, cthreads, buffer2.data, frame.size().width, frame.size().height, 50, 50, binaryCircle5x5Offset, 5, 5, buffer1.data);
-				//manualCopy(&structuringElementStore[objTemplate1Offset], OBJ_TEMPLATE_WIDTH, OBJ_TEMPLATE_HEIGHT, 0, 0, objTemplate3.data, OBJ_TEMPLATE_WIDTH, OBJ_TEMPLATE_HEIGHT);
-				//cv::imshow("Template Buffer 3", objTemplate3);
+				erodeFilterWrapper(cblocks, cthreads, thresholdImage.data, frame.size().width, frame.size().height, 0, 0, binaryCircle5x5Offset, 5, 5, buffer1.data);
+				dilateFilterWrapper(cblocks, cthreads, buffer1.data, frame.size().width, frame.size().height, 0, 0, binaryCircle5x5Offset, 5, 5, buffer2.data);
+				dilateFilterWrapper(cblocks, cthreads, buffer2.data, frame.size().width, frame.size().height, 0, 0, binaryCircle5x5Offset, 5, 5, buffer1.data);
+				erodeFilterWrapper(cblocks, cthreads, buffer1.data, frame.size().width, frame.size().height, 0, 0, binaryCircle5x5Offset, 5, 5, buffer2.data);
+				erodeFilterWrapper(cblocks, cthreads, buffer2.data, frame.size().width, frame.size().height, 0, 0, binaryCircle5x5Offset, 5, 5, buffer1.data);
+				erodeFilterWrapper(cblocks, cthreads, buffer1.data, frame.size().width, frame.size().height, 0, 0, binaryCircle5x5Offset, 5, 5, buffer2.data);
+				erodeFilterWrapper(cblocks, cthreads, buffer2.data, frame.size().width, frame.size().height, 0, 0, binaryCircle5x5Offset, 5, 5, buffer1.data);
+				erodeFilterWrapper(cblocks, cthreads, buffer1.data, frame.size().width, frame.size().height, 0, 0, binaryCircle5x5Offset, 5, 5, buffer2.data);
+				erodeFilterWrapper(cblocks, cthreads, buffer2.data, frame.size().width, frame.size().height, 0, 0, binaryCircle5x5Offset, 5, 5, buffer1.data);
 				// erode by object template
-				erodeFilterWrapper(cblocks, cthreads, buffer2.data, frame.size().width, frame.size().height, 100, 100, objTemplate1Offset, objTemplate1.size().width, objTemplate1.size().height, buffer1.data);
+				//erodeTemplateFilterWrapper(cblocks, cthreads, buffer2.data, frame.size().width, frame.size().height, 100, 100, objTemplate1.data, objTemplate1.size().width, objTemplate1.size().height, buffer1.data);
 				display = buffer1;
 
 				// find the center of mass
-				//cv::Point objCenter = centerOfMass(buffer2.data, frame.size().width, frame.size().height, OBJ_TEMPLATE_HEIGHT + 10, OBJ_TEMPLATE_WIDTH * OBJ_TEMPLATE_HEIGHT);
+				cv::Point objCenter = centerOfMass(buffer1.data, frame.size().width, frame.size().height, OBJ_TEMPLATE_HEIGHT, (OBJ_TEMPLATE_WIDTH * OBJ_TEMPLATE_HEIGHT) / 2);
 				//memset(buffer1.data, 0, buffer1.size().width*buffer1.size().height);
-				//cv::circle(buffer1, objCenter, 40, cv::Scalar(255, 0, 0), 2);
+				cv::circle(frame, objCenter, OBJ_TEMPLATE_WIDTH, cv::Scalar(150, 150, 50), 3);
+				display = frame;
 
 				break;
 			}
@@ -456,6 +464,8 @@ int main() {
 	cudaFreeHost(thresholdImage.data);
 	cudaFreeHost(objTemplate1.data);
 	cudaFreeHost(objTemplate2.data);
+	cudaFreeHost(objTemplate3.data);
+	cudaFreeHost(objTemplate4.data);
 	cudaFreeHost(buffer1.data);
 	cudaFreeHost(buffer2.data);
 	cudaFreeHost(display.data);
@@ -687,6 +697,58 @@ __global__ void erodeFilter(unsigned char *src, int width, int height, int paddi
 		dest[(y * width) + x] = (erode) ? 0 : 255;
 	}
 }
+
+
+void erodeTemplateFilterWrapper(dim3 blocks, dim3 threads, unsigned char *src, int width, int height, int paddingX, int paddingY, unsigned char *objTemplate, int tWidth, int tHeight, unsigned char *dest) {
+#if TIME_GPU
+	cudaEventRecord(start);
+#endif
+
+	erodeTemplateFilter << <blocks, threads >> > (src, width, height, paddingX, paddingY, objTemplate, tWidth, tHeight, dest);
+	cudaDeviceSynchronize();
+
+#if TIME_GPU
+	cudaEventRecord(stop);
+	float ms = 0.0f;
+	cudaEventSynchronize(stop);
+	cudaEventElapsedTime(&ms, start, stop);
+	std::cout << "Elapsed GPU time: " << ms << " milliseconds" << std::endl;
+#endif
+}
+__global__ void erodeTemplateFilter(unsigned char *src, int width, int height, int paddingX, int paddingY, unsigned char *objTemplate, int tWidth, int tHeight, unsigned char *dest)
+{
+	int x = (blockIdx.x * blockDim.x) + threadIdx.x;
+	int y = (blockIdx.y * blockDim.y) + threadIdx.y;
+
+	bool erode = false;
+	int pWidth = tWidth / 2;
+	int pHeight = tHeight / 2;
+
+	// Only execute for valid pixels
+	if (x >= pWidth + paddingX &&
+		y >= pHeight + paddingY &&
+		x < (blockDim.x * gridDim.x) - pWidth - paddingX &&
+		y < (blockDim.y * gridDim.y) - pHeight - paddingY)
+	{
+		for (int j = -pHeight; j <= pHeight && !erode; j++)
+		{
+			for (int i = -pWidth; i <= pWidth && !erode; i++)
+			{
+				// Sample the weight for this location
+				int ki = (i + pWidth);
+				int kj = (j + pHeight);
+				if (objTemplate[(kj * tWidth) + ki] > 0)
+				{
+					int px = x + i;
+					int py = y + j;
+					erode = !(src[(py * width) + px] > 0);
+				}
+			}
+		}
+		dest[(y * width) + x] = (erode) ? 0 : 255;
+	}
+}
+
 
 void dilateFilterWrapper(dim3 blocks, dim3 threads, unsigned char *src, int width, int height, int paddingX, int paddingY, size_t kOffset, int kWidth, int kHeight, unsigned char *dest) {
 #if TIME_GPU
