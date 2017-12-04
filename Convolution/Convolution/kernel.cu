@@ -61,6 +61,10 @@ int keypress;
 int recording, videoName = 1;
 cv::VideoWriter oVideoWriter;
 
+// default image subtraction threshold
+float threshold = 20;
+int backgroundSet = 0;
+
 enum Operations {
 	Normal,
 	Greyscale,
@@ -72,10 +76,6 @@ cv::VideoCapture camera_front(0);
 cv::VideoCapture camera_back(1);
 cv::VideoCapture camera_usb(2);
 cv::VideoCapture activeCamera = camera_front;
-
-// default image subtraction threshold
-float threshold = 20;
-int backgroundSet = 0;
 
 int main() {
 	if (!camera_front.isOpened()) {
@@ -101,6 +101,7 @@ int main() {
 
 	/// CONVOLUTION KERNELS
 	size_t convolutionKernelStoreEndOffset = 0;
+
 	const float gaussian5x5Kernel[25] =
 	{
 		2.f / 159.f,  4.f / 159.f,  5.f / 159.f,  4.f / 159.f, 2.f / 159.f,
@@ -109,11 +110,10 @@ int main() {
 		4.f / 159.f,  9.f / 159.f, 12.f / 159.f,  9.f / 159.f, 4.f / 159.f,
 		2.f / 159.f,  4.f / 159.f,  5.f / 159.f,  4.f / 159.f, 2.f / 159.f,
 	};
-	const size_t gaussian5x5KernelSize = sizeof(gaussian5x5Kernel) / sizeof(gaussian5x5Kernel[0]);
 	const size_t gaussian5x5KernelOffset = convolutionKernelStoreEndOffset;
-	cudaMemcpyToSymbol(convolutionKernelStore, gaussian5x5Kernel, gaussian5x5KernelSize, gaussian5x5KernelOffset);
-	convolutionKernelStoreEndOffset += gaussian5x5KernelSize;
-
+	cudaMemcpyToSymbol(convolutionKernelStore, gaussian5x5Kernel, sizeof(gaussian5x5Kernel), gaussian5x5KernelOffset * sizeof(float));
+	convolutionKernelStoreEndOffset += sizeof(gaussian5x5Kernel) / sizeof(float);
+	
 	const float emboss3x3Kernel[9] =
 	{
 		1.f, 2.f, 1.f,
@@ -126,10 +126,9 @@ int main() {
 		-1.f, 5.f, -1.f,
 		0.f, -1.f, 0.f,*/
 	};
-	const size_t emboss3x3KernelSize = sizeof(emboss3x3Kernel) / sizeof(emboss3x3Kernel[0]);
 	const size_t emboss3x3KernelOffset = convolutionKernelStoreEndOffset;
-	cudaMemcpyToSymbol(convolutionKernelStore, emboss3x3Kernel, emboss3x3KernelSize, emboss3x3KernelOffset);
-	convolutionKernelStoreEndOffset += emboss3x3KernelSize;
+	cudaMemcpyToSymbol(convolutionKernelStore, emboss3x3Kernel, sizeof(emboss3x3Kernel), emboss3x3KernelOffset * sizeof(float));
+	convolutionKernelStoreEndOffset += sizeof(emboss3x3Kernel) / sizeof(float);
 
 	const float outline3x3Kernel[9] =
 	{
@@ -137,10 +136,9 @@ int main() {
 		-1.f, 8.f, -1.f,
 		-1.f, -1.f, -1.f,
 	};
-	const size_t outline3x3KernelSize = sizeof(outline3x3Kernel) / sizeof(outline3x3Kernel[0]);
 	const size_t outline3x3KernelOffset = convolutionKernelStoreEndOffset;
-	cudaMemcpyToSymbol(convolutionKernelStore, outline3x3Kernel, outline3x3KernelSize, outline3x3KernelOffset);
-	convolutionKernelStoreEndOffset += outline3x3KernelSize;
+	cudaMemcpyToSymbol(convolutionKernelStore, outline3x3Kernel, sizeof(outline3x3Kernel), outline3x3KernelOffset * sizeof(float));
+	convolutionKernelStoreEndOffset += sizeof(outline3x3Kernel) / sizeof(float);
 
 	const float leftSobel3x3Kernel[9] =
 	{
@@ -148,10 +146,9 @@ int main() {
 		2.f, 0.f, -2.f,
 		1.f, 0.f, -1.f,
 	};
-	const size_t leftSobel3x3KernelSize = sizeof(leftSobel3x3Kernel) / sizeof(leftSobel3x3Kernel[0]);
 	const size_t leftSobel3x3KernelOffset = convolutionKernelStoreEndOffset;
-	cudaMemcpyToSymbol(convolutionKernelStore, leftSobel3x3Kernel, leftSobel3x3KernelSize, leftSobel3x3KernelOffset);
-	convolutionKernelStoreEndOffset += leftSobel3x3KernelSize;
+	cudaMemcpyToSymbol(convolutionKernelStore, leftSobel3x3Kernel, sizeof(leftSobel3x3Kernel), leftSobel3x3KernelOffset * sizeof(float));
+	convolutionKernelStoreEndOffset += sizeof(leftSobel3x3Kernel) / sizeof(float);
 
 	const float topSobel3x3Kernel[9] =
 	{
@@ -159,10 +156,9 @@ int main() {
 		0.f, 0.f, 0.f,
 		-1.f, -2.f, -1.f,
 	};
-	const size_t topSobel3x3KernelSize = sizeof(topSobel3x3Kernel) / sizeof(topSobel3x3Kernel[0]);
 	const size_t topSobel3x3KernelOffset = convolutionKernelStoreEndOffset;
-	cudaMemcpyToSymbol(convolutionKernelStore, topSobel3x3Kernel, topSobel3x3KernelSize, topSobel3x3KernelOffset);
-	convolutionKernelStoreEndOffset += topSobel3x3KernelSize;
+	cudaMemcpyToSymbol(convolutionKernelStore, topSobel3x3Kernel, sizeof(topSobel3x3Kernel), topSobel3x3KernelOffset * sizeof(float));
+	convolutionKernelStoreEndOffset += sizeof(topSobel3x3Kernel) / sizeof(float);
 
 	/// STRUCTURING ELEMENTS
 	size_t structuringElementStoreEndOffset = 0;
@@ -172,10 +168,9 @@ int main() {
 		1, 1, 1,
 		0, 1, 0
 	};
-	const size_t binaryCircle3x3Size = sizeof(binaryCircle3x3) / sizeof(binaryCircle3x3[0]);
 	const size_t binaryCircle3x3Offset = structuringElementStoreEndOffset;
-	cudaMemcpyToSymbol(structuringElementStore, binaryCircle3x3, binaryCircle3x3Size, binaryCircle3x3Offset);
-	structuringElementStoreEndOffset += binaryCircle3x3Size;
+	cudaMemcpyToSymbol(structuringElementStore, binaryCircle3x3, sizeof(binaryCircle3x3), binaryCircle3x3Offset * sizeof(bool));
+	structuringElementStoreEndOffset += sizeof(binaryCircle3x3) / sizeof(bool);
 
 	const bool binaryCircle5x5[25] =
 	{
@@ -185,10 +180,9 @@ int main() {
 		1, 1, 1, 1, 1,
 		0, 1, 1, 1, 0
 	};
-	const size_t binaryCircle5x5Size = sizeof(binaryCircle5x5) / sizeof(binaryCircle5x5[0]);
 	const size_t binaryCircle5x5Offset = structuringElementStoreEndOffset;
-	cudaMemcpyToSymbol(structuringElementStore, binaryCircle5x5, binaryCircle5x5Size, binaryCircle5x5Offset);
-	structuringElementStoreEndOffset += binaryCircle5x5Size;
+	cudaMemcpyToSymbol(structuringElementStore, binaryCircle5x5, sizeof(binaryCircle5x5), binaryCircle5x5Offset * sizeof(bool));
+	structuringElementStoreEndOffset += sizeof(binaryCircle5x5) / sizeof(bool);
 
 	const bool binaryCircle7x7[49] =
 	{
@@ -200,41 +194,34 @@ int main() {
 		0, 1, 1, 1, 1, 1, 0,
 		0, 0, 1, 1, 1, 0, 0,
 	};
-	const size_t binaryCircle7x7Size = sizeof(binaryCircle7x7) / sizeof(binaryCircle7x7[0]);
 	const size_t binaryCircle7x7Offset = structuringElementStoreEndOffset;
-	cudaMemcpyToSymbol(structuringElementStore, binaryCircle7x7, binaryCircle7x7Size, binaryCircle7x7Offset);
-	structuringElementStoreEndOffset += binaryCircle7x7Size;
+	cudaMemcpyToSymbol(structuringElementStore, binaryCircle7x7, sizeof(binaryCircle7x7), binaryCircle7x7Offset * sizeof(bool));
+	structuringElementStoreEndOffset += sizeof(binaryCircle7x7) / sizeof(bool);
 
 	activeCamera >> frame;
 	unsigned char *greyscaleDataDevice2,
 		*greyscaleDataDevice1,
-		//*hsvImageDataDevice,
 		*backgroundGreyscaleDataDevice,
 		*backgroundGreyscaleBlurredDataDevice,
-		*thresholdDataDevice,
-		*erosionDataDevice,
-		*dilationDataDevice,
-		*ballTemplateDataDevice,
-		//*ballTemplateBufferDataDevice,
-		*bufferDataDevice,
-		*displayDataDevice;
+		*thresholdImageDataDevice,
+		*buffer1DataDevice,
+		*buffer2DataDevice,
+		*displayDataDevice,
+		*ballTemplateDataDevice;
 	cv::Mat greyscale1(frame.size(), CV_8U, createImageBuffer(frame.size().width * frame.size().height, &greyscaleDataDevice1));
 	cv::Mat greyscale2(frame.size(), CV_8U, createImageBuffer(frame.size().width * frame.size().height, &greyscaleDataDevice2));
-	//cv::Mat hsvImage(frame.size() * 3, CV_8U, createImageBuffer(frame.size().width * frame.size().height * 3, &hsvImageDataDevice));
 	cv::Mat backgroundGreyscale(frame.size(), CV_8U, createImageBuffer(frame.size().width * frame.size().height, &backgroundGreyscaleDataDevice));
 	cv::Mat backgroundGreyscaleBlurred(frame.size(), CV_8U, createImageBuffer(frame.size().width * frame.size().height, &backgroundGreyscaleBlurredDataDevice));
-	cv::Mat thresholdImage(frame.size(), CV_8U, createImageBuffer(frame.size().width * frame.size().height, &thresholdDataDevice));
-	cv::Mat erosion(frame.size(), CV_8U, createImageBuffer(frame.size().width * frame.size().height, &erosionDataDevice));
-	cv::Mat dilation(frame.size(), CV_8U, createImageBuffer(frame.size().width * frame.size().height, &dilationDataDevice));
-	cv::Mat buffer(frame.size(), CV_8U, createImageBuffer(frame.size().width * frame.size().height, &bufferDataDevice));
+	cv::Mat thresholdImage(frame.size(), CV_8U, createImageBuffer(frame.size().width * frame.size().height, &thresholdImageDataDevice));
+	cv::Mat buffer1(frame.size(), CV_8U, createImageBuffer(frame.size().width * frame.size().height, &buffer1DataDevice));
+	cv::Mat buffer2(frame.size(), CV_8U, createImageBuffer(frame.size().width * frame.size().height, &buffer2DataDevice));
 	cv::Mat display(frame.size(), CV_8U, createImageBuffer(frame.size().width * frame.size().height, &displayDataDevice));
 
 	int ballTemplateCropRadius = 40;
 	cv::Size ballTemplateSize((ballTemplateCropRadius * 2) + 1, (ballTemplateCropRadius * 2) + 1);
 	cv::Mat ballTemplate(ballTemplateSize, CV_8U, createImageBuffer(ballTemplateSize.width * ballTemplateSize.height, &ballTemplateDataDevice));
-	//cv::Mat ballTemplateBuffer(ballTemplateSize, CV_8U, createImageBuffer(ballTemplateSize.width * ballTemplateSize.height, &ballTemplateBufferDataDevice));
-	cudaMemcpyToSymbol(structuringElementStore, ballTemplateDataDevice, sizeof(ballTemplateDataDevice), binaryCircle7x7Offset + (sizeof(binaryCircle7x7) / sizeof(binaryCircle7x7[0])));
-	const size_t ballTemplateOffset = binaryCircle7x7Offset + (sizeof(binaryCircle7x7) / sizeof(binaryCircle7x7[0]));
+	const size_t ballTemplateOffset = structuringElementStoreEndOffset;
+	cudaMemcpyToSymbol(structuringElementStore, ballTemplateDataDevice, sizeof(ballTemplateDataDevice), ballTemplateOffset * sizeof(bool));
 
 	cv::Mat greyscale, greyscalePrev;
 	cv::Mat hsvImage;
@@ -288,22 +275,24 @@ int main() {
 				display = greyscale;
 				break;
 			case Subtraction:
-				subtractImagesWrapper(cblocks, cthreads, greyscale.data, greyscalePrev.data, frame.size().width, frame.size().height, threshold, bufferDataDevice);
-				display = buffer;
+				subtractImagesWrapper(cblocks, cthreads, greyscale.data, greyscalePrev.data, frame.size().width, frame.size().height, threshold, buffer1DataDevice);
+				display = buffer1;
 				break;
 			case Background:
 				if (backgroundSet) {
 					// blur
-					convolveWrapper(cblocks, cthreads, greyscale.data, frame.size().width, frame.size().height, 0, 0, gaussian5x5KernelOffset, 5, 5, bufferDataDevice);
+					convolveWrapper(cblocks, cthreads, greyscale.data, frame.size().width, frame.size().height, 0, 0, gaussian5x5KernelOffset, 5, 5, buffer1DataDevice);
 					// background subtraction
-					subtractImagesWrapper(cblocks, cthreads, bufferDataDevice, backgroundGreyscaleBlurred.data, frame.size().width, frame.size().height, threshold, thresholdDataDevice);
+					subtractImagesWrapper(cblocks, cthreads, buffer1DataDevice, backgroundGreyscaleBlurred.data, frame.size().width, frame.size().height, threshold, buffer2DataDevice);
 					// erode to remove noise
-					erodeFilterWrapper(cblocks, cthreads, thresholdDataDevice, frame.size().width, frame.size().height, 0, 0, binaryCircle7x7Offset, 7, 7, erosionDataDevice);
+					erodeFilterWrapper(cblocks, cthreads, buffer2DataDevice, frame.size().width, frame.size().height, 0, 0, binaryCircle5x5Offset, 5, 5, buffer1DataDevice);
 					// dilate
-					dilateFilterWrapper(cblocks, cthreads, erosionDataDevice, frame.size().width, frame.size().height, 0, 0, binaryCircle7x7Offset, 7, 7, dilationDataDevice);
+					dilateFilterWrapper(cblocks, cthreads, buffer1DataDevice, frame.size().width, frame.size().height, 0, 0, binaryCircle5x5Offset, 5, 5, buffer2DataDevice);
+
+					display = buffer2;
 
 					// blob detector
-					detector->detect(dilation, keypoints);
+					detector->detect(display, keypoints);
 					// ignore if multiple blobs found
 					if (keypoints.size() > 1) {
 						std::cout << "more than one keypoint found" << std::endl;
@@ -323,7 +312,7 @@ int main() {
 						if (bottom > frame.size().height - 1) bottom = frame.size().height - 1;
 						// build the template
 						cv::Mat part(
-							dilation,
+							display,
 							cv::Range(top, bottom),
 							cv::Range(left, right));
 						ballTemplate = part;
@@ -339,13 +328,11 @@ int main() {
 
 
 						cv::imshow("Template Buffer", ballTemplate);
-						cv::circle(buffer, keypoints[0].pt, 40, cv::Scalar(255, 0, 0), 2);
+						cv::circle(display, keypoints[0].pt, 40, cv::Scalar(255, 0, 0), 2);
 					}
 					else {
 						std::cout << "nothing found - " << std::endl;
 					}
-
-					display = dilation;
 				}
 				else {
 					std::cout << "Take Background Picture by pressing 'p' " << std::endl;
@@ -357,13 +344,14 @@ int main() {
 				}
 				break;
 			case Tracking:
-				erodeFilterWrapper(cblocks, cthreads, thresholdDataDevice, frame.size().width, frame.size().height, 0, 0, binaryCircle5x5Offset, 5, 5, erosionDataDevice);
-				dilateFilterWrapper(cblocks, cthreads, erosionDataDevice, frame.size().width, frame.size().height, 0, 0, binaryCircle5x5Offset, 5, 5, dilationDataDevice);
-				dilateFilterWrapper(cblocks, cthreads, dilationDataDevice, frame.size().width, frame.size().height, 0, 0, binaryCircle5x5Offset, 5, 5, bufferDataDevice);
+				erodeFilterWrapper(cblocks, cthreads, thresholdImageDataDevice, frame.size().width, frame.size().height, 0, 0, binaryCircle3x3Offset, 3, 3, buffer1DataDevice);
+				dilateFilterWrapper(cblocks, cthreads, buffer1DataDevice, frame.size().width, frame.size().height, 0, 0, binaryCircle5x5Offset, 5, 5, buffer2DataDevice);
+				//dilateFilterWrapper(cblocks, cthreads, dilationDataDevice, frame.size().width, frame.size().height, 0, 0, binaryCircle5x5Offset, 5, 5, bufferDataDevice);
+				
 				//invertBIWrapper(cblocks, cthreads, bufferDataDevice, frame.size().width, frame.size().height, dilationDataDevice);
 				//logicalAndWrapper(cblocks, cthreads, dilationDataDevice, bufferDataDevice, erosionDataDevice, frame.size().width, frame.size().height);
 				//erodeFilterWrapper(cblocks, cthreads, bufferDataDevice, frame.size().width, frame.size().height, 0, 0, ballTemplateOffset, ballTemplate.size().width, ballTemplate.size().height, erosionDataDevice);
-				display = buffer;
+				display = buffer2;
 				break;
 			default:
 				break;
@@ -392,11 +380,9 @@ int main() {
 	cudaFreeHost(backgroundGreyscale.data);
 	cudaFreeHost(backgroundGreyscaleBlurred.data);
 	cudaFreeHost(thresholdImage.data);
-	cudaFreeHost(erosion.data);
-	cudaFreeHost(dilation.data);
 	cudaFreeHost(ballTemplate.data);
-	//cudaFreeHost(ballTemplateBuffer.data);
-	cudaFreeHost(buffer.data);
+	cudaFreeHost(buffer1.data);
+	cudaFreeHost(buffer2.data);
 	cudaFreeHost(display.data);
 
 	oVideoWriter.release();
