@@ -221,7 +221,7 @@ int main() {
 	cv::Size ballTemplateSize((ballTemplateCropRadius * 2) + 1, (ballTemplateCropRadius * 2) + 1);
 	cv::Mat ballTemplate(ballTemplateSize, CV_8U, createImageBuffer(ballTemplateSize.width * ballTemplateSize.height, &ballTemplateDataDevice));
 	const size_t ballTemplateOffset = structuringElementStoreEndOffset;
-	cudaMemcpyToSymbol(structuringElementStore, ballTemplateDataDevice, sizeof(ballTemplateDataDevice), ballTemplateOffset * sizeof(bool));
+	cudaMemcpyToSymbol(structuringElementStore, ballTemplate.data, sizeof(ballTemplate.data), ballTemplateOffset * sizeof(bool));
 
 	cv::Mat greyscale, greyscalePrev;
 	cv::Mat hsvImage;
@@ -275,19 +275,19 @@ int main() {
 				display = greyscale;
 				break;
 			case Subtraction:
-				subtractImagesWrapper(cblocks, cthreads, greyscale.data, greyscalePrev.data, frame.size().width, frame.size().height, threshold, buffer1DataDevice);
+				subtractImagesWrapper(cblocks, cthreads, greyscale.data, greyscalePrev.data, frame.size().width, frame.size().height, threshold, buffer1.data);
 				display = buffer1;
 				break;
 			case Background:
 				if (backgroundSet) {
 					// blur
-					convolveWrapper(cblocks, cthreads, greyscale.data, frame.size().width, frame.size().height, 0, 0, gaussian5x5KernelOffset, 5, 5, buffer1DataDevice);
+					convolveWrapper(cblocks, cthreads, greyscale.data, frame.size().width, frame.size().height, 0, 0, gaussian5x5KernelOffset, 5, 5, buffer1.data);
 					// background subtraction
-					subtractImagesWrapper(cblocks, cthreads, buffer1DataDevice, backgroundGreyscaleBlurred.data, frame.size().width, frame.size().height, threshold, buffer2DataDevice);
+					subtractImagesWrapper(cblocks, cthreads, buffer1.data, backgroundGreyscaleBlurred.data, frame.size().width, frame.size().height, threshold, buffer2.data);
 					// erode to remove noise
-					erodeFilterWrapper(cblocks, cthreads, buffer2DataDevice, frame.size().width, frame.size().height, 0, 0, binaryCircle5x5Offset, 5, 5, buffer1DataDevice);
+					erodeFilterWrapper(cblocks, cthreads, buffer2.data, frame.size().width, frame.size().height, 0, 0, binaryCircle5x5Offset, 5, 5, buffer1.data);
 					// dilate
-					dilateFilterWrapper(cblocks, cthreads, buffer1DataDevice, frame.size().width, frame.size().height, 0, 0, binaryCircle5x5Offset, 5, 5, buffer2DataDevice);
+					dilateFilterWrapper(cblocks, cthreads, buffer1.data, frame.size().width, frame.size().height, 0, 0, binaryCircle5x5Offset, 5, 5, buffer2.data);
 
 					display = buffer2;
 
@@ -317,7 +317,7 @@ int main() {
 							cv::Range(left, right));
 						ballTemplate = part;
 
-						cudaMemcpyToSymbol(structuringElementStore, ballTemplateDataDevice, sizeof(ballTemplateDataDevice), ballTemplateOffset);
+						cudaMemcpyToSymbol(structuringElementStore, ballTemplate.data, sizeof(ballTemplate.data), ballTemplateOffset);
 
 						char h_range = 15;
 						char s_range = 100;
@@ -339,14 +339,14 @@ int main() {
 					while (1) if (cv::waitKey(1) == 112) break;
 					activeCamera >> background;
 					cv::cvtColor(background, backgroundGreyscale, CV_BGR2GRAY);
-					convolveWrapper(cblocks, cthreads, backgroundGreyscale.data, frame.size().width, frame.size().height, 0, 0, gaussian5x5KernelOffset, 5, 5, backgroundGreyscaleBlurredDataDevice);
+					convolveWrapper(cblocks, cthreads, backgroundGreyscale.data, frame.size().width, frame.size().height, 0, 0, gaussian5x5KernelOffset, 5, 5, backgroundGreyscaleBlurred.data);
 					backgroundSet = 1;
 				}
 				break;
 			case Tracking:
-				erodeFilterWrapper(cblocks, cthreads, thresholdImageDataDevice, frame.size().width, frame.size().height, 0, 0, binaryCircle5x5Offset, 5, 5, buffer1DataDevice);
-				dilateFilterWrapper(cblocks, cthreads, buffer1DataDevice, frame.size().width, frame.size().height, 0, 0, binaryCircle5x5Offset, 5, 5, buffer2DataDevice);
-				//erodeFilterWrapper(cblocks, cthreads, bufferDataDevice, frame.size().width, frame.size().height, 0, 0, ballTemplateOffset, ballTemplate.size().width, ballTemplate.size().height, erosionDataDevice);
+				erodeFilterWrapper(cblocks, cthreads, thresholdImage.data, frame.size().width, frame.size().height, 0, 0, binaryCircle5x5Offset, 5, 5, buffer1.data);
+				dilateFilterWrapper(cblocks, cthreads, buffer1.data, frame.size().width, frame.size().height, 0, 0, binaryCircle5x5Offset, 5, 5, buffer2.data);
+				//erodeFilterWrapper(cblocks, cthreads, buffer.data, frame.size().width, frame.size().height, 0, 0, ballTemplateOffset, ballTemplate.size().width, ballTemplate.size().height, erosion.data);
 				display = buffer2;
 				break;
 			default:
@@ -933,22 +933,22 @@ int main() {
 					display = greyscale;
 					break;
 				case Blurred:
-					convolveWrapper(cblocks, cthreads, greyscaleDataDevice, frame.size().width, frame.size().height, 0, 0, gaussian5x5KernelOffset, 5, 5, blurredDataDevice);
+					convolveWrapper(cblocks, cthreads, greyscale.data, frame.size().width, frame.size().height, 0, 0, gaussian5x5KernelOffset, 5, 5, blurred.data);
 					display = blurred;
 					break;
 				case Embossed:
-					convolveWrapper(cblocks, cthreads, greyscaleDataDevice, frame.size().width, frame.size().height, 0, 0, emboss3x3KernelOffset, 3, 3, embossedDataDevice);
+					convolveWrapper(cblocks, cthreads, greyscale.data, frame.size().width, frame.size().height, 0, 0, emboss3x3KernelOffset, 3, 3, embossed.data);
 					display = embossed;
 					break;
 				case Outline:
-					convolveWrapper(cblocks, cthreads, greyscaleDataDevice, frame.size().width, frame.size().height, 0, 0, outline3x3KernelOffset, 3, 3, outlineDataDevice);
+					convolveWrapper(cblocks, cthreads, greyscale.data, frame.size().width, frame.size().height, 0, 0, outline3x3KernelOffset, 3, 3, outline.data);
 					display = outline;
 					break;
 				case Sobel:
-					convolveWrapper(cblocks, cthreads, greyscaleDataDevice, frame.size().width, frame.size().height, 0, 0, gaussian5x5KernelOffset, 5, 5, blurredDataDevice);
-					convolveWrapper(cblocks, cthreads, blurredDataDevice, frame.size().width, frame.size().height, 0, 0, leftSobel3x3KernelOffset, 3, 3, leftSobelDataDevice);
-					convolveWrapper(cblocks, cthreads, blurredDataDevice, frame.size().width, frame.size().height, 0, 0, topSobel3x3KernelOffset, 3, 3, topSobelDataDevice);
-					pythagorasWrapper(pblocks, pthreads, leftSobelDataDevice, topSobelDataDevice, sobelDataDevice);
+					convolveWrapper(cblocks, cthreads, greyscale.data, frame.size().width, frame.size().height, 0, 0, gaussian5x5KernelOffset, 5, 5, blurred.data);
+					convolveWrapper(cblocks, cthreads, blurred.data, frame.size().width, frame.size().height, 0, 0, leftSobel3x3KernelOffset, 3, 3, leftSobel.data);
+					convolveWrapper(cblocks, cthreads, blurred.data, frame.size().width, frame.size().height, 0, 0, topSobel3x3KernelOffset, 3, 3, topSobel.data);
+					pythagorasWrapper(pblocks, pthreads, leftSobel.data, topSobel.data, sobel.data);
 					display = sobel;
 					break;
 				default:
@@ -966,22 +966,22 @@ int main() {
 				display = greyscale;
 				break;
 			case Blurred:
-				convolve_slow(greyscaleDataDevice, frame.size().width, frame.size().height, 0, 0, gaussian5x5KernelOffset, 5, 5, gaussian5x5Kernel, blurredDataDevice);
+				convolve_slow(greyscale.data, frame.size().width, frame.size().height, 0, 0, gaussian5x5KernelOffset, 5, 5, gaussian5x5Kernel, blurred.data);
 				display = blurred;
 				break;
 			case Embossed:
-				convolve_slow(greyscaleDataDevice, frame.size().width, frame.size().height, 0, 0, emboss3x3KernelOffset, 3, 3, emboss3x3Kernel, embossedDataDevice);
+				convolve_slow(greyscale.data, frame.size().width, frame.size().height, 0, 0, emboss3x3KernelOffset, 3, 3, emboss3x3Kernel, embossed.data);
 				display = embossed;
 				break;
 			case Outline:
-				convolve_slow(greyscaleDataDevice, frame.size().width, frame.size().height, 0, 0, outline3x3KernelOffset, 3, 3, outline3x3Kernel, outlineDataDevice);
+				convolve_slow(greyscale.data, frame.size().width, frame.size().height, 0, 0, outline3x3KernelOffset, 3, 3, outline3x3Kernel, outline.data);
 				display = outline;
 				break;
 			case Sobel:
-				convolve_slow(greyscaleDataDevice, frame.size().width, frame.size().height, 0, 0, gaussian5x5KernelOffset, 5, 5, gaussian5x5Kernel, blurredDataDevice);
-				convolve_slow(blurredDataDevice, frame.size().width, frame.size().height, 0, 0, leftSobel3x3KernelOffset, 3, 3, leftSobel3x3Kernel, leftSobelDataDevice);
-				convolve_slow(blurredDataDevice, frame.size().width, frame.size().height, 0, 0, topSobel3x3KernelOffset, 3, 3, topSobel3x3Kernel, topSobelDataDevice);
-				pythagoras_slow(leftSobelDataDevice, topSobelDataDevice, sobelDataDevice, frame.size().width, frame.size().height);
+				convolve_slow(greyscale.data, frame.size().width, frame.size().height, 0, 0, gaussian5x5KernelOffset, 5, 5, gaussian5x5Kernel, blurred.data);
+				convolve_slow(blurred.data, frame.size().width, frame.size().height, 0, 0, leftSobel3x3KernelOffset, 3, 3, leftSobel3x3Kernel, leftSobel.data);
+				convolve_slow(blurred.data, frame.size().width, frame.size().height, 0, 0, topSobel3x3KernelOffset, 3, 3, topSobel3x3Kernel, topSobel.data);
+				pythagoras_slow(leftSobel.data, topSobel.data, sobel.data, frame.size().width, frame.size().height);
 				display = sobel;
 			default:
 				break;
