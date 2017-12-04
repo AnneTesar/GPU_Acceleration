@@ -344,12 +344,8 @@ int main() {
 				}
 				break;
 			case Tracking:
-				erodeFilterWrapper(cblocks, cthreads, thresholdImageDataDevice, frame.size().width, frame.size().height, 0, 0, binaryCircle3x3Offset, 3, 3, buffer1DataDevice);
+				erodeFilterWrapper(cblocks, cthreads, thresholdImageDataDevice, frame.size().width, frame.size().height, 0, 0, binaryCircle5x5Offset, 5, 5, buffer1DataDevice);
 				dilateFilterWrapper(cblocks, cthreads, buffer1DataDevice, frame.size().width, frame.size().height, 0, 0, binaryCircle5x5Offset, 5, 5, buffer2DataDevice);
-				//dilateFilterWrapper(cblocks, cthreads, dilationDataDevice, frame.size().width, frame.size().height, 0, 0, binaryCircle5x5Offset, 5, 5, bufferDataDevice);
-				
-				//invertBIWrapper(cblocks, cthreads, bufferDataDevice, frame.size().width, frame.size().height, dilationDataDevice);
-				//logicalAndWrapper(cblocks, cthreads, dilationDataDevice, bufferDataDevice, erosionDataDevice, frame.size().width, frame.size().height);
 				//erodeFilterWrapper(cblocks, cthreads, bufferDataDevice, frame.size().width, frame.size().height, 0, 0, ballTemplateOffset, ballTemplate.size().width, ballTemplate.size().height, erosionDataDevice);
 				display = buffer2;
 				break;
