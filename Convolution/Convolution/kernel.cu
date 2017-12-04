@@ -19,24 +19,24 @@ Credit and thanks to https://github.com/Teknoman117/cuda/blob/master/imgproc_exa
 #include "opencv2/imgproc.hpp"
 #include "opencv2/features2d.hpp"
 
-/// Constants
+////// CONSTANTS
 #define TIME_GPU 0
 #define OBJ_TEMPLATE_WIDTH (40)
 #define OBJ_TEMPLATE_HEIGHT (40)
+#define OBJ_H_RANGE (15)
+#define OBJ_S_RANGE (100)
+#define OBJ_V_RANGE (100)
 
-#if TIME_GPU
-cudaEvent_t start, stop;
-#endif
-
-// convolution kernels
+////// GPU CONSTANTS
 __constant__ float convolutionKernelStore[256];
-// structuring elements
 __constant__ bool structuringElementStore[10000];
 
+////// PROTOTYPES
 unsigned char *createImageBuffer(unsigned int bytes, unsigned char **devicePtr);
 void centerOfMass(cv::Point centerPoint, unsigned char *source, int width, int height, int outlierDist, int maxPoints);
 void handleKeypress(int keypress, cv::Mat frame);
 
+////// GPU PROTOTYPES
 void invertBIWrapper(dim3 blocks, dim3 threads, unsigned char *source, int width, int height, unsigned char *destination);
 __global__ void invertBI(unsigned char *source, int width, int height, unsigned char *destination);
 
@@ -58,13 +58,7 @@ __global__ void erodeFilter(unsigned char *source, int width, int height, int pa
 void dilateFilterWrapper(dim3 blocks, dim3 threads, unsigned char *source, int width, int height, int paddingX, int paddingY, size_t kOffset, int kWidth, int kHeight, unsigned char *destination);
 __global__ void dilateFilter(unsigned char *source, int width, int height, int paddingX, int paddingY, size_t kOffset, int kWidth, int kHeight, unsigned char *destination);
 
-int recording, videoName = 1;
-cv::VideoWriter oVideoWriter;
-
-// default image subtraction threshold
-float threshold = 20;
-int backgroundSet = 0;
-
+////// ENUMS
 enum Operations {
 	Normal,
 	Greyscale,
@@ -72,34 +66,23 @@ enum Operations {
 	Background,
 	Tracking
 }activeOperation;
+
+////// GLOBAL VARIABLES
+float threshold = 20;
+int backgroundSet = 0;
+int recording = 0;
+int videoName = 1;
+cv::VideoWriter oVideoWriter;
 cv::VideoCapture camera_front(0);
 cv::VideoCapture camera_back(1);
 cv::VideoCapture camera_usb(2);
 cv::VideoCapture activeCamera = camera_front;
-
-int main() {
-	if (!camera_front.isOpened()) {
-		std::cout << "Front camera not opened" << std::endl;
-		activeCamera = camera_back;
-	}
-	if (!camera_back.isOpened()) {
-		std::cout << "Back camera not opened" << std::endl;
-	}
-	if (!camera_usb.isOpened()) {
-		std::cout << "USB camera not opened" << std::endl;
-	}
-
-	cv::Mat frame;
-	cv::Mat background;
-
-	recording = 0;
-
 #if TIME_GPU
-	cudaEventCreate(&start);
-	cudaEventCreate(&stop);
+cudaEvent_t start, stop;
 #endif
 
-	/// CONVOLUTION KERNELS
+int main() {
+	////// CONVOLUTION KERNELS
 	size_t convolutionKernelStoreEndOffset = 0;
 
 	const float gaussian5x5Kernel[25] =
@@ -113,7 +96,7 @@ int main() {
 	const size_t gaussian5x5KernelOffset = convolutionKernelStoreEndOffset;
 	cudaMemcpyToSymbol(convolutionKernelStore, gaussian5x5Kernel, sizeof(gaussian5x5Kernel), gaussian5x5KernelOffset * sizeof(float));
 	convolutionKernelStoreEndOffset += sizeof(gaussian5x5Kernel) / sizeof(float);
-	
+
 	const float emboss3x3Kernel[9] =
 	{
 		1.f, 2.f, 1.f,
@@ -160,7 +143,7 @@ int main() {
 	cudaMemcpyToSymbol(convolutionKernelStore, topSobel3x3Kernel, sizeof(topSobel3x3Kernel), topSobel3x3KernelOffset * sizeof(float));
 	convolutionKernelStoreEndOffset += sizeof(topSobel3x3Kernel) / sizeof(float);
 
-	/// STRUCTURING ELEMENTS
+	////// STRUCTURING ELEMENTS
 	size_t structuringElementStoreEndOffset = 0;
 	const bool binaryCircle3x3[9] =
 	{
@@ -198,40 +181,22 @@ int main() {
 	cudaMemcpyToSymbol(structuringElementStore, binaryCircle7x7, sizeof(binaryCircle7x7), binaryCircle7x7Offset * sizeof(bool));
 	structuringElementStoreEndOffset += sizeof(binaryCircle7x7) / sizeof(bool);
 
-	activeCamera >> frame;
-	unsigned char *greyscaleDataDevice2,
-		*greyscaleDataDevice1,
-		*backgroundGreyscaleDataDevice,
-		*backgroundGreyscaleBlurredDataDevice,
-		*thresholdImageDataDevice,
-		*buffer1DataDevice,
-		*buffer2DataDevice,
-		*displayDataDevice,
-		*objTemplateDataDevice;
-	cv::Mat greyscale1(frame.size(), CV_8U, createImageBuffer(frame.size().width * frame.size().height, &greyscaleDataDevice1));
-	cv::Mat greyscale2(frame.size(), CV_8U, createImageBuffer(frame.size().width * frame.size().height, &greyscaleDataDevice2));
-	cv::Mat backgroundGreyscale(frame.size(), CV_8U, createImageBuffer(frame.size().width * frame.size().height, &backgroundGreyscaleDataDevice));
-	cv::Mat backgroundGreyscaleBlurred(frame.size(), CV_8U, createImageBuffer(frame.size().width * frame.size().height, &backgroundGreyscaleBlurredDataDevice));
-	cv::Mat thresholdImage(frame.size(), CV_8U, createImageBuffer(frame.size().width * frame.size().height, &thresholdImageDataDevice));
-	cv::Mat buffer1(frame.size(), CV_8U, createImageBuffer(frame.size().width * frame.size().height, &buffer1DataDevice));
-	cv::Mat buffer2(frame.size(), CV_8U, createImageBuffer(frame.size().width * frame.size().height, &buffer2DataDevice));
-	cv::Mat display(frame.size(), CV_8U, createImageBuffer(frame.size().width * frame.size().height, &displayDataDevice));
-
-	cv::Size objTemplateSize( (OBJ_TEMPLATE_WIDTH * 2) + 1, (OBJ_TEMPLATE_HEIGHT * 2) + 1);
+	// object template setup
+	unsigned char *objTemplateDataDevice;
+	cv::Size objTemplateSize((OBJ_TEMPLATE_WIDTH * 2) + 1, (OBJ_TEMPLATE_HEIGHT * 2) + 1);
 	cv::Mat objTemplate(objTemplateSize, CV_8U, createImageBuffer(objTemplateSize.width * objTemplateSize.height, &objTemplateDataDevice));
 	const size_t objTemplateOffset = structuringElementStoreEndOffset;
 	cudaMemcpyToSymbol(structuringElementStore, objTemplate.data, sizeof(objTemplate.data), objTemplateOffset * sizeof(bool));
 
-	cv::Mat greyscale, greyscalePrev;
-	cv::Mat hsvImage;
-
-	// object HSV thresholds
+	////// VARIABLES
+	int greyscaleState = 1;
+	int keypress, keypressCur;
+	
+	// object hsv thresholds
 	cv::Vec3b lower_hsv = { 0, 0, 200 };
 	cv::Vec3b upper_hsv = { 255, 255, 255 };
 
-	int greyscaleState = 1;
-	int keypress, keypressCur;
-
+	// blob detector parameters
 	cv::SimpleBlobDetector::Params params;
 	// params.filterByArea = true;
 	// params.minArea = 1;
@@ -241,9 +206,63 @@ int main() {
 	cv::Ptr<cv::SimpleBlobDetector> detector = cv::SimpleBlobDetector::create(params);
 	std::vector<cv::KeyPoint> keypoints;
 
+#if TIME_GPU
+	cudaEventCreate(&start);
+	cudaEventCreate(&stop);
+#endif
 
+	// camera frame
+	cv::Mat frame;
+
+	// setup cameras
+	if (!camera_front.isOpened()) {
+		std::cout << "Front camera not opened" << std::endl;
+		activeCamera = camera_back;
+	}
+	if (!camera_back.isOpened()) {
+		std::cout << "Back camera not opened" << std::endl;
+	}
+	if (!camera_usb.isOpened()) {
+		std::cout << "USB camera not opened" << std::endl;
+	}
+
+	// grab the first frame
+	activeCamera >> frame;
+
+	// image buffers
+	unsigned char *greyscaleDataDevice2,
+		*greyscaleDataDevice1,
+		*backgroundGreyscaleDataDevice,
+		*backgroundGreyscaleBlurredDataDevice,
+		*thresholdImageDataDevice,
+		*buffer1DataDevice,
+		*buffer2DataDevice,
+		*displayDataDevice;
+	cv::Mat greyscale1(frame.size(), CV_8U, createImageBuffer(frame.size().width * frame.size().height, &greyscaleDataDevice1));
+	cv::Mat greyscale2(frame.size(), CV_8U, createImageBuffer(frame.size().width * frame.size().height, &greyscaleDataDevice2));
+	cv::Mat backgroundGreyscale(frame.size(), CV_8U, createImageBuffer(frame.size().width * frame.size().height, &backgroundGreyscaleDataDevice));
+	cv::Mat backgroundGreyscaleBlurred(frame.size(), CV_8U, createImageBuffer(frame.size().width * frame.size().height, &backgroundGreyscaleBlurredDataDevice));
+	cv::Mat thresholdImage(frame.size(), CV_8U, createImageBuffer(frame.size().width * frame.size().height, &thresholdImageDataDevice));
+	cv::Mat buffer1(frame.size(), CV_8U, createImageBuffer(frame.size().width * frame.size().height, &buffer1DataDevice));
+	cv::Mat buffer2(frame.size(), CV_8U, createImageBuffer(frame.size().width * frame.size().height, &buffer2DataDevice));
+	cv::Mat display(frame.size(), CV_8U, createImageBuffer(frame.size().width * frame.size().height, &displayDataDevice));
+	cv::Mat background,
+		greyscale,
+		greyscalePrev,
+		hsvImage;
+
+	// GPU settings
+	dim3 cblocks(frame.size().width / 16, frame.size().height / 16);
+	dim3 cthreads(16, 16);
+	dim3 pblocks(frame.size().width * frame.size().height / 256);
+	dim3 pthreads(256, 1);
+
+	// main loop
 	while (1) {
+		// grab the camera frame
 		activeCamera >> frame;
+
+		// converty to greyscale
 		if (greyscaleState == 1) {
 			cv::cvtColor(frame, greyscale1, CV_BGR2GRAY);
 			greyscalePrev = greyscale2;
@@ -259,12 +278,8 @@ int main() {
 
 		// convert to HSV
 		cv::cvtColor(frame, hsvImage, CV_BGR2HSV);
-		cv::inRange(hsvImage, lower_hsv, upper_hsv, thresholdImage);
 
-		dim3 cblocks(frame.size().width / 16, frame.size().height / 16);
-		dim3 cthreads(16, 16);
-		dim3 pblocks(frame.size().width * frame.size().height / 256);
-		dim3 pthreads(256, 1);
+		// state
 		{
 			switch (activeOperation) {
 			case Normal:
@@ -283,9 +298,8 @@ int main() {
 					convolveWrapper(cblocks, cthreads, greyscale.data, frame.size().width, frame.size().height, 0, 0, gaussian5x5KernelOffset, 5, 5, buffer1.data);
 					// background subtraction
 					subtractImagesWrapper(cblocks, cthreads, buffer1.data, backgroundGreyscaleBlurred.data, frame.size().width, frame.size().height, threshold, buffer2.data);
-					// erode to remove noise
+					// open to remove noise
 					erodeFilterWrapper(cblocks, cthreads, buffer2.data, frame.size().width, frame.size().height, 0, 0, binaryCircle5x5Offset, 5, 5, buffer1.data);
-					// dilate
 					dilateFilterWrapper(cblocks, cthreads, buffer1.data, frame.size().width, frame.size().height, 0, 0, binaryCircle5x5Offset, 5, 5, buffer2.data);
 
 					display = buffer2;
@@ -315,15 +329,12 @@ int main() {
 							cv::Range(top, bottom),
 							cv::Range(left, right));
 						objTemplate = part;
-
+						// copy the template into the structuring element store
 						cudaMemcpyToSymbol(structuringElementStore, objTemplate.data, sizeof(objTemplate.data), objTemplateOffset);
-
-						char h_range = 15;
-						char s_range = 100;
-						char v_range = 100;
+						// find the object's color
 						cv::Vec3b colorOfObj = hsvImage.at<cv::Vec3b>(centerPoint);
-						lower_hsv = cv::Vec3b(max(colorOfObj[0] - h_range, 0), max(colorOfObj[1] - s_range, 0), max(colorOfObj[2] - v_range, 0));
-						upper_hsv = cv::Vec3b(min(colorOfObj[0] + h_range, 255), min(colorOfObj[1] + s_range, 255), min(colorOfObj[2] + v_range, 255));
+						lower_hsv = cv::Vec3b(max(colorOfObj[0] - OBJ_H_RANGE, 0), max(colorOfObj[1] - OBJ_S_RANGE, 0), max(colorOfObj[2] - OBJ_V_RANGE, 0));
+						upper_hsv = cv::Vec3b(min(colorOfObj[0] + OBJ_H_RANGE, 255), min(colorOfObj[1] + OBJ_S_RANGE, 255), min(colorOfObj[2] + OBJ_V_RANGE, 255));
 
 
 						cv::imshow("Template Buffer", objTemplate);
@@ -343,8 +354,12 @@ int main() {
 				}
 				break;
 			case Tracking:
+				// threshold on object color
+				cv::inRange(hsvImage, lower_hsv, upper_hsv, thresholdImage);
+				// open the image to reduce noise
 				erodeFilterWrapper(cblocks, cthreads, thresholdImage.data, frame.size().width, frame.size().height, 0, 0, binaryCircle5x5Offset, 5, 5, buffer1.data);
 				dilateFilterWrapper(cblocks, cthreads, buffer1.data, frame.size().width, frame.size().height, 0, 0, binaryCircle5x5Offset, 5, 5, buffer2.data);
+				// erode by object template
 				//erodeFilterWrapper(cblocks, cthreads, buffer.data, frame.size().width, frame.size().height, 0, 0, objTemplateOffset, objTemplate.size().width, objTemplate.size().height, erosion.data);
 				display = buffer2;
 				break;
@@ -353,6 +368,7 @@ int main() {
 			}
 		}
 
+		// record to video
 		if (recording)
 			oVideoWriter.write(display);
 
@@ -362,14 +378,16 @@ int main() {
 			cv::imshow("Convolution", display);
 		}
 
+		// handle keypresses
 		keypressCur = cv::waitKey(1);
 		if (keypressCur < 255) {
 			keypress = keypressCur;
 			handleKeypress(keypress, frame);
 		}
-
 		if (keypress == 27) break;
 	}
+
+	// free GPU space
 	cudaFreeHost(greyscale1.data);
 	cudaFreeHost(greyscale2.data);
 	cudaFreeHost(backgroundGreyscale.data);
@@ -379,7 +397,7 @@ int main() {
 	cudaFreeHost(buffer1.data);
 	cudaFreeHost(buffer2.data);
 	cudaFreeHost(display.data);
-
+	// free others
 	oVideoWriter.release();
 
 	return 0;
