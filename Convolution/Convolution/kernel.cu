@@ -408,16 +408,19 @@ int main() {
 				// threshold on object color
 				cv::inRange(hsvImage, lower_hsv, upper_hsv, thresholdImage);
 				// open the image to reduce noise
-				erodeFilterWrapper(cblocks, cthreads, thresholdImage.data, frame.size().width, frame.size().height, 0, 0, binaryCircle5x5Offset, 5, 5, buffer1.data);
-				dilateFilterWrapper(cblocks, cthreads, buffer1.data, frame.size().width, frame.size().height, 0, 0, binaryCircle5x5Offset, 5, 5, buffer2.data);
+				erodeFilterWrapper(cblocks, cthreads, thresholdImage.data, frame.size().width, frame.size().height, 50, 50, binaryCircle5x5Offset, 5, 5, buffer1.data);
+				dilateFilterWrapper(cblocks, cthreads, thresholdImage.data, frame.size().width, frame.size().height, 50, 50, binaryCircle5x5Offset, 5, 5, buffer2.data);
+				dilateFilterWrapper(cblocks, cthreads, buffer2.data, frame.size().width, frame.size().height, 50, 50, binaryCircle5x5Offset, 5, 5, buffer1.data);
+				//manualCopy(&structuringElementStore[objTemplate1Offset], OBJ_TEMPLATE_WIDTH, OBJ_TEMPLATE_HEIGHT, 0, 0, objTemplate3.data, OBJ_TEMPLATE_WIDTH, OBJ_TEMPLATE_HEIGHT);
+				//cv::imshow("Template Buffer 3", objTemplate3);
 				// erode by object template
-				//erodeFilterWrapper(cblocks, cthreads, buffer2.data, frame.size().width, frame.size().height, 0, 0, objTemplate1Offset, objTemplate1.size().width, objTemplate1.size().height, buffer1.data);
+				erodeFilterWrapper(cblocks, cthreads, buffer2.data, frame.size().width, frame.size().height, 100, 100, objTemplate1Offset, objTemplate1.size().width, objTemplate1.size().height, buffer1.data);
 				display = buffer1;
 
 				// find the center of mass
-				cv::Point objCenter = centerOfMass(buffer2.data, frame.size().width, frame.size().height, OBJ_TEMPLATE_HEIGHT + 10, OBJ_TEMPLATE_WIDTH * OBJ_TEMPLATE_HEIGHT);
-				memset(buffer1.data, 0, buffer1.size().width*buffer1.size().height);
-				cv::circle(buffer1, objCenter, 40, cv::Scalar(255, 0, 0), 2);
+				//cv::Point objCenter = centerOfMass(buffer2.data, frame.size().width, frame.size().height, OBJ_TEMPLATE_HEIGHT + 10, OBJ_TEMPLATE_WIDTH * OBJ_TEMPLATE_HEIGHT);
+				//memset(buffer1.data, 0, buffer1.size().width*buffer1.size().height);
+				//cv::circle(buffer1, objCenter, 40, cv::Scalar(255, 0, 0), 2);
 
 				break;
 			}
@@ -673,16 +676,16 @@ __global__ void erodeFilter(unsigned char *src, int width, int height, int paddi
 				// Sample the weight for this location
 				int ki = (i + pWidth);
 				int kj = (j + pHeight);
-				bool w = (structuringElementStore[(kj * kWidth) + ki + kOffset] > 0);
-				if (w)
+				if (structuringElementStore[(kj * kWidth) + ki + kOffset] > 0)
 				{
-					erode = !(src[((y + j) * width) + (x + i)] > 0);
+					int px = x + i;
+					int py = y + j;
+					erode = !(src[(py * width) + px] > 0);
 				}
 			}
 		}
+		dest[(y * width) + x] = (erode) ? 0 : 255;
 	}
-
-	dest[(y * width) + x] = (erode) ? 0 : 255;
 }
 
 void dilateFilterWrapper(dim3 blocks, dim3 threads, unsigned char *src, int width, int height, int paddingX, int paddingY, size_t kOffset, int kWidth, int kHeight, unsigned char *dest) {
@@ -727,7 +730,9 @@ __global__ void dilateFilter(unsigned char *src, int width, int height, int padd
 					int kj = (j + pHeight);
 					if (structuringElementStore[(kj * kWidth) + ki + kOffset] > 0)
 					{
-						dest[((y + j) * width) + (x + i)] = 255;
+						int px = x + i;
+						int py = y + j;
+						dest[(py * width) + px] = 255;
 					}
 				}
 			}
