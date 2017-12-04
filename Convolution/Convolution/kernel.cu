@@ -191,6 +191,7 @@ int main() {
 	activeCamera >> frame;
 	unsigned char *greyscaleDataDevice2,
 		*greyscaleDataDevice1,
+		//*hsvImageDataDevice,
 		*backgroundGreyscaleDataDevice,
 		*backgroundGreyscaleBlurredDataDevice,
 		*thresholdDataDevice,
@@ -202,6 +203,7 @@ int main() {
 		*displayDataDevice;
 	cv::Mat greyscale1(frame.size(), CV_8U, createImageBuffer(frame.size().width * frame.size().height, &greyscaleDataDevice1));
 	cv::Mat greyscale2(frame.size(), CV_8U, createImageBuffer(frame.size().width * frame.size().height, &greyscaleDataDevice2));
+	//cv::Mat hsvImage(frame.size() * 3, CV_8U, createImageBuffer(frame.size().width * frame.size().height * 3, &hsvImageDataDevice));
 	cv::Mat backgroundGreyscale(frame.size(), CV_8U, createImageBuffer(frame.size().width * frame.size().height, &backgroundGreyscaleDataDevice));
 	cv::Mat backgroundGreyscaleBlurred(frame.size(), CV_8U, createImageBuffer(frame.size().width * frame.size().height, &backgroundGreyscaleBlurredDataDevice));
 	cv::Mat thresholdImage(frame.size(), CV_8U, createImageBuffer(frame.size().width * frame.size().height, &thresholdDataDevice));
@@ -218,10 +220,10 @@ int main() {
 	const size_t ballTemplateOffset = binaryCircle7x7Offset + (sizeof(binaryCircle7x7) / sizeof(binaryCircle7x7[0]));
 
 	cv::Mat greyscale, greyscalePrev;
-	cv::Mat hsvimage;
+	cv::Mat hsvImage;
 
 	// object HSV thresholds
-  cv::Vec3b lower_hsv = { 0, 0, 200 };
+	cv::Vec3b lower_hsv = { 0, 0, 200 };
 	cv::Vec3b upper_hsv = { 255, 255, 255 };
 
 	int greyscaleState = 1;
@@ -253,8 +255,8 @@ int main() {
 		}
 
 		// convert to HSV
-		cv::cvtColor(frame, hsvimage, CV_BGR2HSV);
-		cv::inRange(hsvimage, lower_hsv, upper_hsv, thresholdImage);
+		cv::cvtColor(frame, hsvImage, CV_BGR2HSV);
+		cv::inRange(hsvImage, lower_hsv, upper_hsv, thresholdImage);
 
 		dim3 cblocks(frame.size().width / 16, frame.size().height / 16);
 		dim3 cthreads(16, 16);
@@ -314,7 +316,7 @@ int main() {
 						char h_range = 15;
 						char s_range = 100;
 						char v_range = 100;
-						cv::Vec3b colorOfBall = hsvimage.at<cv::Vec3b>(centerPoint);
+						cv::Vec3b colorOfBall = hsvImage.at<cv::Vec3b>(centerPoint);
 						lower_hsv = cv::Vec3b(max(colorOfBall[0] - h_range, 0), max(colorOfBall[1] - s_range, 0), max(colorOfBall[2] - v_range, 0));
 						upper_hsv = cv::Vec3b(min(colorOfBall[0] + h_range, 255), min(colorOfBall[1] + s_range, 255), min(colorOfBall[2] + v_range, 255));
 
@@ -342,9 +344,9 @@ int main() {
 				dilateFilterWrapper(cblocks, cthreads, erosionDataDevice, frame.size().width, frame.size().height, 0, 0, binaryCircle5x5Offset, 5, 5, dilationDataDevice);
 				dilateFilterWrapper(cblocks, cthreads, dilationDataDevice, frame.size().width, frame.size().height, 0, 0, binaryCircle5x5Offset, 5, 5, bufferDataDevice);
 				//invertBIWrapper(cblocks, cthreads, bufferDataDevice, frame.size().width, frame.size().height, dilationDataDevice);
-				display = dilation;
+				//logicalAndWrapper(cblocks, cthreads, dilationDataDevice, bufferDataDevice, erosionDataDevice, frame.size().width, frame.size().height);
 				//erodeFilterWrapper(cblocks, cthreads, bufferDataDevice, frame.size().width, frame.size().height, 0, 0, ballTemplateOffset, ballTemplate.size().width, ballTemplate.size().height, erosionDataDevice);
-				//display = erosion;
+				display = buffer;
 				break;
 			default:
 				break;
