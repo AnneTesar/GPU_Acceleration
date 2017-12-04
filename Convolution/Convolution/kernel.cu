@@ -4,9 +4,6 @@
 Credit and thanks to https://github.com/Teknoman117/cuda/blob/master/imgproc_example/main.cu
 */
 
-// GPU benchmark control
-#define TIME_GPU 0
-
 #include <stdlib.h>
 #include <stddef.h>
 #include <stdio.h>
@@ -22,6 +19,11 @@ Credit and thanks to https://github.com/Teknoman117/cuda/blob/master/imgproc_exa
 #include "opencv2/imgproc.hpp"
 #include "opencv2/features2d.hpp"
 
+/// Constants
+#define TIME_GPU 0
+#define OBJ_TEMPLATE_WIDTH (40)
+#define OBJ_TEMPLATE_HEIGHT (40)
+
 #if TIME_GPU
 cudaEvent_t start, stop;
 #endif
@@ -32,6 +34,8 @@ __constant__ float convolutionKernelStore[256];
 __constant__ bool structuringElementStore[10000];
 
 unsigned char *createImageBuffer(unsigned int bytes, unsigned char **devicePtr);
+void centerOfMass(cv::Point centerPoint, unsigned char *source, int width, int height, int outlierDist, int maxPoints);
+void handleKeypress(int keypress, cv::Mat frame);
 
 void invertBIWrapper(dim3 blocks, dim3 threads, unsigned char *source, int width, int height, unsigned char *destination);
 __global__ void invertBI(unsigned char *source, int width, int height, unsigned char *destination);
@@ -54,10 +58,6 @@ __global__ void erodeFilter(unsigned char *source, int width, int height, int pa
 void dilateFilterWrapper(dim3 blocks, dim3 threads, unsigned char *source, int width, int height, int paddingX, int paddingY, size_t kOffset, int kWidth, int kHeight, unsigned char *destination);
 __global__ void dilateFilter(unsigned char *source, int width, int height, int paddingX, int paddingY, size_t kOffset, int kWidth, int kHeight, unsigned char *destination);
 
-void centerOfMass(cv::Point centerPoint, unsigned char *source, int width, int height, int outlierDist, int maxPoints);
-void handleKeypress(cv::Mat frame);
-
-int keypress;
 int recording, videoName = 1;
 cv::VideoWriter oVideoWriter;
 
@@ -207,7 +207,7 @@ int main() {
 		*buffer1DataDevice,
 		*buffer2DataDevice,
 		*displayDataDevice,
-		*ballTemplateDataDevice;
+		*objTemplateDataDevice;
 	cv::Mat greyscale1(frame.size(), CV_8U, createImageBuffer(frame.size().width * frame.size().height, &greyscaleDataDevice1));
 	cv::Mat greyscale2(frame.size(), CV_8U, createImageBuffer(frame.size().width * frame.size().height, &greyscaleDataDevice2));
 	cv::Mat backgroundGreyscale(frame.size(), CV_8U, createImageBuffer(frame.size().width * frame.size().height, &backgroundGreyscaleDataDevice));
@@ -217,11 +217,10 @@ int main() {
 	cv::Mat buffer2(frame.size(), CV_8U, createImageBuffer(frame.size().width * frame.size().height, &buffer2DataDevice));
 	cv::Mat display(frame.size(), CV_8U, createImageBuffer(frame.size().width * frame.size().height, &displayDataDevice));
 
-	int ballTemplateCropRadius = 40;
-	cv::Size ballTemplateSize((ballTemplateCropRadius * 2) + 1, (ballTemplateCropRadius * 2) + 1);
-	cv::Mat ballTemplate(ballTemplateSize, CV_8U, createImageBuffer(ballTemplateSize.width * ballTemplateSize.height, &ballTemplateDataDevice));
-	const size_t ballTemplateOffset = structuringElementStoreEndOffset;
-	cudaMemcpyToSymbol(structuringElementStore, ballTemplate.data, sizeof(ballTemplate.data), ballTemplateOffset * sizeof(bool));
+	cv::Size objTemplateSize( (OBJ_TEMPLATE_WIDTH * 2) + 1, (OBJ_TEMPLATE_HEIGHT * 2) + 1);
+	cv::Mat objTemplate(objTemplateSize, CV_8U, createImageBuffer(objTemplateSize.width * objTemplateSize.height, &objTemplateDataDevice));
+	const size_t objTemplateOffset = structuringElementStoreEndOffset;
+	cudaMemcpyToSymbol(structuringElementStore, objTemplate.data, sizeof(objTemplate.data), objTemplateOffset * sizeof(bool));
 
 	cv::Mat greyscale, greyscalePrev;
 	cv::Mat hsvImage;
@@ -231,7 +230,7 @@ int main() {
 	cv::Vec3b upper_hsv = { 255, 255, 255 };
 
 	int greyscaleState = 1;
-	int keypressCur;
+	int keypress, keypressCur;
 
 	cv::SimpleBlobDetector::Params params;
 	// params.filterByArea = true;
@@ -302,32 +301,32 @@ int main() {
 						// grab the center
 						cv::Point centerPoint = keypoints[0].pt;
 						// pick bounds for blob template
-						int left = floor(centerPoint.x) - ballTemplateCropRadius;
+						int left = floor(centerPoint.x) - OBJ_TEMPLATE_WIDTH;
 						if (left < 0) left = 0;
-						int right = floor(centerPoint.x) + ballTemplateCropRadius;
+						int right = floor(centerPoint.x) + OBJ_TEMPLATE_WIDTH;
 						if (right > frame.size().width - 1) right = frame.size().width - 1;
-						int top = floor(centerPoint.y) - ballTemplateCropRadius;
+						int top = floor(centerPoint.y) - OBJ_TEMPLATE_HEIGHT;
 						if (top < 0) top = 0;
-						int bottom = floor(centerPoint.y) + ballTemplateCropRadius;
+						int bottom = floor(centerPoint.y) + OBJ_TEMPLATE_HEIGHT;
 						if (bottom > frame.size().height - 1) bottom = frame.size().height - 1;
 						// build the template
 						cv::Mat part(
 							display,
 							cv::Range(top, bottom),
 							cv::Range(left, right));
-						ballTemplate = part;
+						objTemplate = part;
 
-						cudaMemcpyToSymbol(structuringElementStore, ballTemplate.data, sizeof(ballTemplate.data), ballTemplateOffset);
+						cudaMemcpyToSymbol(structuringElementStore, objTemplate.data, sizeof(objTemplate.data), objTemplateOffset);
 
 						char h_range = 15;
 						char s_range = 100;
 						char v_range = 100;
-						cv::Vec3b colorOfBall = hsvImage.at<cv::Vec3b>(centerPoint);
-						lower_hsv = cv::Vec3b(max(colorOfBall[0] - h_range, 0), max(colorOfBall[1] - s_range, 0), max(colorOfBall[2] - v_range, 0));
-						upper_hsv = cv::Vec3b(min(colorOfBall[0] + h_range, 255), min(colorOfBall[1] + s_range, 255), min(colorOfBall[2] + v_range, 255));
+						cv::Vec3b colorOfObj = hsvImage.at<cv::Vec3b>(centerPoint);
+						lower_hsv = cv::Vec3b(max(colorOfObj[0] - h_range, 0), max(colorOfObj[1] - s_range, 0), max(colorOfObj[2] - v_range, 0));
+						upper_hsv = cv::Vec3b(min(colorOfObj[0] + h_range, 255), min(colorOfObj[1] + s_range, 255), min(colorOfObj[2] + v_range, 255));
 
 
-						cv::imshow("Template Buffer", ballTemplate);
+						cv::imshow("Template Buffer", objTemplate);
 						cv::circle(display, keypoints[0].pt, 40, cv::Scalar(255, 0, 0), 2);
 					}
 					else {
@@ -346,7 +345,7 @@ int main() {
 			case Tracking:
 				erodeFilterWrapper(cblocks, cthreads, thresholdImage.data, frame.size().width, frame.size().height, 0, 0, binaryCircle5x5Offset, 5, 5, buffer1.data);
 				dilateFilterWrapper(cblocks, cthreads, buffer1.data, frame.size().width, frame.size().height, 0, 0, binaryCircle5x5Offset, 5, 5, buffer2.data);
-				//erodeFilterWrapper(cblocks, cthreads, buffer.data, frame.size().width, frame.size().height, 0, 0, ballTemplateOffset, ballTemplate.size().width, ballTemplate.size().height, erosion.data);
+				//erodeFilterWrapper(cblocks, cthreads, buffer.data, frame.size().width, frame.size().height, 0, 0, objTemplateOffset, objTemplate.size().width, objTemplate.size().height, erosion.data);
 				display = buffer2;
 				break;
 			default:
@@ -366,7 +365,7 @@ int main() {
 		keypressCur = cv::waitKey(1);
 		if (keypressCur < 255) {
 			keypress = keypressCur;
-			handleKeypress(frame);
+			handleKeypress(keypress, frame);
 		}
 
 		if (keypress == 27) break;
@@ -376,7 +375,7 @@ int main() {
 	cudaFreeHost(backgroundGreyscale.data);
 	cudaFreeHost(backgroundGreyscaleBlurred.data);
 	cudaFreeHost(thresholdImage.data);
-	cudaFreeHost(ballTemplate.data);
+	cudaFreeHost(objTemplate.data);
 	cudaFreeHost(buffer1.data);
 	cudaFreeHost(buffer2.data);
 	cudaFreeHost(display.data);
@@ -713,7 +712,7 @@ void centerOfMass(cv::Point centerPoint, unsigned char *source, int width, int h
 	return;
 }
 
-void handleKeypress(cv::Mat frame) {
+void handleKeypress(int keypress, cv::Mat frame) {
 	switch (keypress) {
 	case 97: /* a */
 		activeOperation = Normal;
