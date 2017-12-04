@@ -56,9 +56,9 @@ __global__ void dilateFilter(unsigned char *source, int width, int height, int p
 
 void centerOfMass(cv::Point centerPoint, unsigned char *source, int width, int height, int outlierDist, int maxPoints);
 void handleKeypress(cv::Mat frame);
+
 int keypress;
 int recording, videoName = 1;
-
 cv::VideoWriter oVideoWriter;
 
 enum Operations {
@@ -73,7 +73,7 @@ cv::VideoCapture camera_back(1);
 cv::VideoCapture camera_usb(2);
 cv::VideoCapture activeCamera = camera_front;
 
-// default calibration threshold
+// default image subtraction threshold
 float threshold = 20;
 int backgroundSet = 0;
 
@@ -100,8 +100,8 @@ int main() {
 #endif
 
 	/// CONVOLUTION KERNELS
-
-	const float gaussianKernel[25] =
+	size_t convolutionKernelStoreEndOffset = 0;
+	const float gaussian5x5Kernel[25] =
 	{
 		2.f / 159.f,  4.f / 159.f,  5.f / 159.f,  4.f / 159.f, 2.f / 159.f,
 		4.f / 159.f,  9.f / 159.f, 12.f / 159.f,  9.f / 159.f, 4.f / 159.f,
@@ -109,10 +109,12 @@ int main() {
 		4.f / 159.f,  9.f / 159.f, 12.f / 159.f,  9.f / 159.f, 4.f / 159.f,
 		2.f / 159.f,  4.f / 159.f,  5.f / 159.f,  4.f / 159.f, 2.f / 159.f,
 	};
-	cudaMemcpyToSymbol(convolutionKernelStore, gaussianKernel, sizeof(gaussianKernel), 0);
-	const size_t gaussianKernelOffset = 0;
+	const size_t gaussian5x5KernelSize = sizeof(gaussian5x5Kernel) / sizeof(gaussian5x5Kernel[0]);
+	const size_t gaussian5x5KernelOffset = convolutionKernelStoreEndOffset;
+	cudaMemcpyToSymbol(convolutionKernelStore, gaussian5x5Kernel, gaussian5x5KernelSize, gaussian5x5KernelOffset);
+	convolutionKernelStoreEndOffset += gaussian5x5KernelSize;
 
-	const float embossKernel[9] =
+	const float emboss3x3Kernel[9] =
 	{
 		1.f, 2.f, 1.f,
 		0.f, 0.f, 0.f,
@@ -124,45 +126,56 @@ int main() {
 		-1.f, 5.f, -1.f,
 		0.f, -1.f, 0.f,*/
 	};
-	cudaMemcpyToSymbol(convolutionKernelStore, embossKernel, sizeof(embossKernel), sizeof(gaussianKernel));
-	const size_t embossKernelOffset = sizeof(gaussianKernel) / sizeof(float);
+	const size_t emboss3x3KernelSize = sizeof(emboss3x3Kernel) / sizeof(emboss3x3Kernel[0]);
+	const size_t emboss3x3KernelOffset = convolutionKernelStoreEndOffset;
+	cudaMemcpyToSymbol(convolutionKernelStore, emboss3x3Kernel, emboss3x3KernelSize, emboss3x3KernelOffset);
+	convolutionKernelStoreEndOffset += emboss3x3KernelSize;
 
-	const float outlineKernel[9] =
+	const float outline3x3Kernel[9] =
 	{
 		-1.f, -1.f, -1.f,
 		-1.f, 8.f, -1.f,
 		-1.f, -1.f, -1.f,
 	};
-	cudaMemcpyToSymbol(convolutionKernelStore, outlineKernel, sizeof(outlineKernel), sizeof(gaussianKernel) + sizeof(embossKernel));
-	const size_t outlineKernelOffset = sizeof(embossKernel) / sizeof(float) + embossKernelOffset;
+	const size_t outline3x3KernelSize = sizeof(outline3x3Kernel) / sizeof(outline3x3Kernel[0]);
+	const size_t outline3x3KernelOffset = convolutionKernelStoreEndOffset;
+	cudaMemcpyToSymbol(convolutionKernelStore, outline3x3Kernel, outline3x3KernelSize, outline3x3KernelOffset);
+	convolutionKernelStoreEndOffset += outline3x3KernelSize;
 
-	const float leftSobelKernel[9] =
+	const float leftSobel3x3Kernel[9] =
 	{
 		1.f, 0.f, -1.f,
 		2.f, 0.f, -2.f,
 		1.f, 0.f, -1.f,
 	};
-	cudaMemcpyToSymbol(convolutionKernelStore, leftSobelKernel, sizeof(leftSobelKernel), sizeof(gaussianKernel) + sizeof(embossKernel) + sizeof(outlineKernel));
-	const size_t leftSobelKernelOffset = sizeof(outlineKernel) / sizeof(float) + outlineKernelOffset;
-	const float topSobelKernel[9] =
+	const size_t leftSobel3x3KernelSize = sizeof(leftSobel3x3Kernel) / sizeof(leftSobel3x3Kernel[0]);
+	const size_t leftSobel3x3KernelOffset = convolutionKernelStoreEndOffset;
+	cudaMemcpyToSymbol(convolutionKernelStore, leftSobel3x3Kernel, leftSobel3x3KernelSize, leftSobel3x3KernelOffset);
+	convolutionKernelStoreEndOffset += leftSobel3x3KernelSize;
+
+	const float topSobel3x3Kernel[9] =
 	{
 		1.f, 2.f, 1.f,
 		0.f, 0.f, 0.f,
 		-1.f, -2.f, -1.f,
 	};
-	cudaMemcpyToSymbol(convolutionKernelStore, topSobelKernel, sizeof(topSobelKernel), sizeof(gaussianKernel) + sizeof(embossKernel) + sizeof(outlineKernel) + sizeof(leftSobelKernel));
-	const size_t topSobelKernelOffset = sizeof(leftSobelKernel) / sizeof(float) + leftSobelKernelOffset;
+	const size_t topSobel3x3KernelSize = sizeof(topSobel3x3Kernel) / sizeof(topSobel3x3Kernel[0]);
+	const size_t topSobel3x3KernelOffset = convolutionKernelStoreEndOffset;
+	cudaMemcpyToSymbol(convolutionKernelStore, topSobel3x3Kernel, topSobel3x3KernelSize, topSobel3x3KernelOffset);
+	convolutionKernelStoreEndOffset += topSobel3x3KernelSize;
 
 	/// STRUCTURING ELEMENTS
-
+	size_t structuringElementStoreEndOffset = 0;
 	const bool binaryCircle3x3[9] =
 	{
 		0, 1, 0,
 		1, 1, 1,
 		0, 1, 0
 	};
-	cudaMemcpyToSymbol(structuringElementStore, binaryCircle3x3, sizeof(binaryCircle3x3), 0);
-	const size_t binaryCircle3x3Offset = 0;
+	const size_t binaryCircle3x3Size = sizeof(binaryCircle3x3) / sizeof(binaryCircle3x3[0]);
+	const size_t binaryCircle3x3Offset = structuringElementStoreEndOffset;
+	cudaMemcpyToSymbol(structuringElementStore, binaryCircle3x3, binaryCircle3x3Size, binaryCircle3x3Offset);
+	structuringElementStoreEndOffset += binaryCircle3x3Size;
 
 	const bool binaryCircle5x5[25] =
 	{
@@ -172,8 +185,10 @@ int main() {
 		1, 1, 1, 1, 1,
 		0, 1, 1, 1, 0
 	};
-	cudaMemcpyToSymbol(structuringElementStore, binaryCircle5x5, sizeof(binaryCircle5x5), sizeof(binaryCircle3x3) / sizeof(binaryCircle3x3[0]));
-	const size_t binaryCircle5x5Offset = binaryCircle3x3Offset + (sizeof(binaryCircle3x3) / sizeof(binaryCircle3x3[0]));
+	const size_t binaryCircle5x5Size = sizeof(binaryCircle5x5) / sizeof(binaryCircle5x5[0]);
+	const size_t binaryCircle5x5Offset = structuringElementStoreEndOffset;
+	cudaMemcpyToSymbol(structuringElementStore, binaryCircle5x5, binaryCircle5x5Size, binaryCircle5x5Offset);
+	structuringElementStoreEndOffset += binaryCircle5x5Size;
 
 	const bool binaryCircle7x7[49] =
 	{
@@ -185,8 +200,10 @@ int main() {
 		0, 1, 1, 1, 1, 1, 0,
 		0, 0, 1, 1, 1, 0, 0,
 	};
-	cudaMemcpyToSymbol(structuringElementStore, binaryCircle7x7, sizeof(binaryCircle7x7), binaryCircle5x5Offset + (sizeof(binaryCircle5x5) / sizeof(binaryCircle5x5[0])));
-	const size_t binaryCircle7x7Offset = binaryCircle5x5Offset + (sizeof(binaryCircle5x5) / sizeof(binaryCircle5x5[0]));
+	const size_t binaryCircle7x7Size = sizeof(binaryCircle7x7) / sizeof(binaryCircle7x7[0]);
+	const size_t binaryCircle7x7Offset = structuringElementStoreEndOffset;
+	cudaMemcpyToSymbol(structuringElementStore, binaryCircle7x7, binaryCircle7x7Size, binaryCircle7x7Offset);
+	structuringElementStoreEndOffset += binaryCircle7x7Size;
 
 	activeCamera >> frame;
 	unsigned char *greyscaleDataDevice2,
@@ -277,7 +294,7 @@ int main() {
 			case Background:
 				if (backgroundSet) {
 					// blur
-					convolveWrapper(cblocks, cthreads, greyscale.data, frame.size().width, frame.size().height, 0, 0, gaussianKernelOffset, 5, 5, bufferDataDevice);
+					convolveWrapper(cblocks, cthreads, greyscale.data, frame.size().width, frame.size().height, 0, 0, gaussian5x5KernelOffset, 5, 5, bufferDataDevice);
 					// background subtraction
 					subtractImagesWrapper(cblocks, cthreads, bufferDataDevice, backgroundGreyscaleBlurred.data, frame.size().width, frame.size().height, threshold, thresholdDataDevice);
 					// erode to remove noise
@@ -335,7 +352,7 @@ int main() {
 					while (1) if (cv::waitKey(1) == 112) break;
 					activeCamera >> background;
 					cv::cvtColor(background, backgroundGreyscale, CV_BGR2GRAY);
-					convolveWrapper(cblocks, cthreads, backgroundGreyscale.data, frame.size().width, frame.size().height, 0, 0, gaussianKernelOffset, 5, 5, backgroundGreyscaleBlurredDataDevice);
+					convolveWrapper(cblocks, cthreads, backgroundGreyscale.data, frame.size().width, frame.size().height, 0, 0, gaussian5x5KernelOffset, 5, 5, backgroundGreyscaleBlurredDataDevice);
 					backgroundSet = 1;
 				}
 				break;
@@ -847,7 +864,7 @@ int main() {
 	clock_t start_clock, end_clock;
 	double cpu_time_used;
 
-	const float gaussianKernel[25] =
+	const float gaussian5x5Kernel[25] =
 	{
 		2.f / 159.f,  4.f / 159.f,  5.f / 159.f,  4.f / 159.f, 2.f / 159.f,
 		4.f / 159.f,  9.f / 159.f, 12.f / 159.f,  9.f / 159.f, 4.f / 159.f,
@@ -855,10 +872,10 @@ int main() {
 		4.f / 159.f,  9.f / 159.f, 12.f / 159.f,  9.f / 159.f, 4.f / 159.f,
 		2.f / 159.f,  4.f / 159.f,  5.f / 159.f,  4.f / 159.f, 2.f / 159.f,
 	};
-	cudaMemcpyToSymbol(convolutionKernelStore, gaussianKernel, sizeof(gaussianKernel), 0);
-	const size_t gaussianKernelOffset = 0;
+	cudaMemcpyToSymbol(convolutionKernelStore, gaussian5x5Kernel, sizeof(gaussian5x5Kernel), 0);
+	const size_t gaussian5x5KernelOffset = 0;
 
-	const float embossKernel[9] =
+	const float emboss3x3Kernel[9] =
 	{
 		1.f, 2.f, 1.f,
 		0.f, 0.f, 0.f,
@@ -870,34 +887,34 @@ int main() {
 		-1.f, 5.f, -1.f,
 		0.f, -1.f, 0.f,*/
 	};
-	cudaMemcpyToSymbol(convolutionKernelStore, embossKernel, sizeof(embossKernel), sizeof(gaussianKernel));
-	const size_t embossKernelOffset = sizeof(gaussianKernel) / sizeof(float);
+	cudaMemcpyToSymbol(convolutionKernelStore, emboss3x3Kernel, sizeof(emboss3x3Kernel), sizeof(gaussian5x5Kernel));
+	const size_t emboss3x3KernelOffset = sizeof(gaussian5x5Kernel) / sizeof(float);
 
-	const float outlineKernel[9] =
+	const float outline3x3Kernel[9] =
 	{
 		-1.f, -1.f, -1.f,
 		-1.f, 8.f, -1.f,
 		-1.f, -1.f, -1.f,
 	};
-	cudaMemcpyToSymbol(convolutionKernelStore, outlineKernel, sizeof(outlineKernel), sizeof(gaussianKernel) + sizeof(embossKernel));
-	const size_t outlineKernelOffset = sizeof(embossKernel) / sizeof(float) + embossKernelOffset;
+	cudaMemcpyToSymbol(convolutionKernelStore, outline3x3Kernel, sizeof(outline3x3Kernel), sizeof(gaussian5x5Kernel) + sizeof(emboss3x3Kernel));
+	const size_t outline3x3KernelOffset = sizeof(emboss3x3Kernel) / sizeof(float) + emboss3x3KernelOffset;
 
-	const float leftSobelKernel[9] =
+	const float leftSobel3x3Kernel[9] =
 	{
 		1.f, 0.f, -1.f,
 		2.f, 0.f, -2.f,
 		1.f, 0.f, -1.f,
 	};
-	cudaMemcpyToSymbol(convolutionKernelStore, leftSobelKernel, sizeof(leftSobelKernel), sizeof(gaussianKernel) + sizeof(embossKernel) + sizeof(outlineKernel));
-	const size_t leftSobelKernelOffset = sizeof(outlineKernel) / sizeof(float) + outlineKernelOffset;
-	const float topSobelKernel[9] =
+	cudaMemcpyToSymbol(convolutionKernelStore, leftSobel3x3Kernel, sizeof(leftSobel3x3Kernel), sizeof(gaussian5x5Kernel) + sizeof(emboss3x3Kernel) + sizeof(outline3x3Kernel));
+	const size_t leftSobel3x3KernelOffset = sizeof(outline3x3Kernel) / sizeof(float) + outline3x3KernelOffset;
+	const float topSobel3x3Kernel[9] =
 	{
 		1.f, 2.f, 1.f,
 		0.f, 0.f, 0.f,
 		-1.f, -2.f, -1.f,
 	};
-	cudaMemcpyToSymbol(convolutionKernelStore, topSobelKernel, sizeof(topSobelKernel), sizeof(gaussianKernel) + sizeof(embossKernel) + sizeof(outlineKernel) + sizeof(leftSobelKernel));
-	const size_t topSobelKernelOffset = sizeof(leftSobelKernel) / sizeof(float) + leftSobelKernelOffset;
+	cudaMemcpyToSymbol(convolutionKernelStore, topSobel3x3Kernel, sizeof(topSobel3x3Kernel), sizeof(gaussian5x5Kernel) + sizeof(emboss3x3Kernel) + sizeof(outline3x3Kernel) + sizeof(leftSobel3x3Kernel));
+	const size_t topSobel3x3KernelOffset = sizeof(leftSobel3x3Kernel) / sizeof(float) + leftSobel3x3KernelOffset;
 
 	activeCamera >> frame;
 	unsigned char *leftSobelDataDevice, *topSobelDataDevice;
@@ -934,21 +951,21 @@ int main() {
 					display = greyscale;
 					break;
 				case Blurred:
-					convolveWrapper(cblocks, cthreads, greyscaleDataDevice, frame.size().width, frame.size().height, 0, 0, gaussianKernelOffset, 5, 5, blurredDataDevice);
+					convolveWrapper(cblocks, cthreads, greyscaleDataDevice, frame.size().width, frame.size().height, 0, 0, gaussian5x5KernelOffset, 5, 5, blurredDataDevice);
 					display = blurred;
 					break;
 				case Embossed:
-					convolveWrapper(cblocks, cthreads, greyscaleDataDevice, frame.size().width, frame.size().height, 0, 0, embossKernelOffset, 3, 3, embossedDataDevice);
+					convolveWrapper(cblocks, cthreads, greyscaleDataDevice, frame.size().width, frame.size().height, 0, 0, emboss3x3KernelOffset, 3, 3, embossedDataDevice);
 					display = embossed;
 					break;
 				case Outline:
-					convolveWrapper(cblocks, cthreads, greyscaleDataDevice, frame.size().width, frame.size().height, 0, 0, outlineKernelOffset, 3, 3, outlineDataDevice);
+					convolveWrapper(cblocks, cthreads, greyscaleDataDevice, frame.size().width, frame.size().height, 0, 0, outline3x3KernelOffset, 3, 3, outlineDataDevice);
 					display = outline;
 					break;
 				case Sobel:
-					convolveWrapper(cblocks, cthreads, greyscaleDataDevice, frame.size().width, frame.size().height, 0, 0, gaussianKernelOffset, 5, 5, blurredDataDevice);
-					convolveWrapper(cblocks, cthreads, blurredDataDevice, frame.size().width, frame.size().height, 0, 0, leftSobelKernelOffset, 3, 3, leftSobelDataDevice);
-					convolveWrapper(cblocks, cthreads, blurredDataDevice, frame.size().width, frame.size().height, 0, 0, topSobelKernelOffset, 3, 3, topSobelDataDevice);
+					convolveWrapper(cblocks, cthreads, greyscaleDataDevice, frame.size().width, frame.size().height, 0, 0, gaussian5x5KernelOffset, 5, 5, blurredDataDevice);
+					convolveWrapper(cblocks, cthreads, blurredDataDevice, frame.size().width, frame.size().height, 0, 0, leftSobel3x3KernelOffset, 3, 3, leftSobelDataDevice);
+					convolveWrapper(cblocks, cthreads, blurredDataDevice, frame.size().width, frame.size().height, 0, 0, topSobel3x3KernelOffset, 3, 3, topSobelDataDevice);
 					pythagorasWrapper(pblocks, pthreads, leftSobelDataDevice, topSobelDataDevice, sobelDataDevice);
 					display = sobel;
 					break;
@@ -967,21 +984,21 @@ int main() {
 				display = greyscale;
 				break;
 			case Blurred:
-				convolve_slow(greyscaleDataDevice, frame.size().width, frame.size().height, 0, 0, gaussianKernelOffset, 5, 5, gaussianKernel, blurredDataDevice);
+				convolve_slow(greyscaleDataDevice, frame.size().width, frame.size().height, 0, 0, gaussian5x5KernelOffset, 5, 5, gaussian5x5Kernel, blurredDataDevice);
 				display = blurred;
 				break;
 			case Embossed:
-				convolve_slow(greyscaleDataDevice, frame.size().width, frame.size().height, 0, 0, embossKernelOffset, 3, 3, embossKernel, embossedDataDevice);
+				convolve_slow(greyscaleDataDevice, frame.size().width, frame.size().height, 0, 0, emboss3x3KernelOffset, 3, 3, emboss3x3Kernel, embossedDataDevice);
 				display = embossed;
 				break;
 			case Outline:
-				convolve_slow(greyscaleDataDevice, frame.size().width, frame.size().height, 0, 0, outlineKernelOffset, 3, 3, outlineKernel, outlineDataDevice);
+				convolve_slow(greyscaleDataDevice, frame.size().width, frame.size().height, 0, 0, outline3x3KernelOffset, 3, 3, outline3x3Kernel, outlineDataDevice);
 				display = outline;
 				break;
 			case Sobel:
-				convolve_slow(greyscaleDataDevice, frame.size().width, frame.size().height, 0, 0, gaussianKernelOffset, 5, 5, gaussianKernel, blurredDataDevice);
-				convolve_slow(blurredDataDevice, frame.size().width, frame.size().height, 0, 0, leftSobelKernelOffset, 3, 3, leftSobelKernel, leftSobelDataDevice);
-				convolve_slow(blurredDataDevice, frame.size().width, frame.size().height, 0, 0, topSobelKernelOffset, 3, 3, topSobelKernel, topSobelDataDevice);
+				convolve_slow(greyscaleDataDevice, frame.size().width, frame.size().height, 0, 0, gaussian5x5KernelOffset, 5, 5, gaussian5x5Kernel, blurredDataDevice);
+				convolve_slow(blurredDataDevice, frame.size().width, frame.size().height, 0, 0, leftSobel3x3KernelOffset, 3, 3, leftSobel3x3Kernel, leftSobelDataDevice);
+				convolve_slow(blurredDataDevice, frame.size().width, frame.size().height, 0, 0, topSobel3x3KernelOffset, 3, 3, topSobel3x3Kernel, topSobelDataDevice);
 				pythagoras_slow(leftSobelDataDevice, topSobelDataDevice, sobelDataDevice, frame.size().width, frame.size().height);
 				display = sobel;
 			default:
