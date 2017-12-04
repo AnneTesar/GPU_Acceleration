@@ -33,11 +33,11 @@ __constant__ bool structuringElementStore[10000];
 
 unsigned char *createImageBuffer(unsigned int bytes, unsigned char **devicePtr);
 
-void invertBIWrapper(dim3 blocks, dim3 threads, unsigned char *source, unsigned char *destination);
-__global__ void invertBI(unsigned char *source, unsigned char *destination);
+void invertBIWrapper(dim3 blocks, dim3 threads, unsigned char *source, int width, int height, unsigned char *destination);
+__global__ void invertBI(unsigned char *source, int width, int height, unsigned char *destination);
 
-void logicalAndWrapper(dim3 blocks, dim3 threads, unsigned char *a, unsigned char *b, unsigned char *c);
-__global__ void logicalAnd(unsigned char *a, unsigned char *b, unsigned char *c);
+void logicalAndWrapper(dim3 blocks, dim3 threads, unsigned char *a, unsigned char *b, unsigned char *c, int width, int height);
+__global__ void logicalAnd(unsigned char *a, unsigned char *b, unsigned char *c, int width, int height);
 
 void pythagorasWrapper(dim3 blocks, dim3 threads, unsigned char *a, unsigned char *b, unsigned char *c);
 __global__ void pythagoras(unsigned char *a, unsigned char *b, unsigned char *c);
@@ -338,10 +338,11 @@ int main() {
 				}
 				break;
 			case Tracking:
-				erodeFilterWrapper(cblocks, cthreads, thresholdDataDevice, frame.size().width, frame.size().height, 0, 0, binaryCircle7x7Offset, 7, 7, erosionDataDevice);
-				dilateFilterWrapper(cblocks, cthreads, erosionDataDevice, frame.size().width, frame.size().height, 0, 0, binaryCircle7x7Offset, 7, 7, dilationDataDevice);
-				dilateFilterWrapper(cblocks, cthreads, dilationDataDevice, frame.size().width, frame.size().height, 0, 0, binaryCircle7x7Offset, 7, 7, bufferDataDevice);
-				display = buffer;
+				erodeFilterWrapper(cblocks, cthreads, thresholdDataDevice, frame.size().width, frame.size().height, 0, 0, binaryCircle5x5Offset, 5, 5, erosionDataDevice);
+				dilateFilterWrapper(cblocks, cthreads, erosionDataDevice, frame.size().width, frame.size().height, 0, 0, binaryCircle5x5Offset, 5, 5, dilationDataDevice);
+				dilateFilterWrapper(cblocks, cthreads, dilationDataDevice, frame.size().width, frame.size().height, 0, 0, binaryCircle5x5Offset, 5, 5, bufferDataDevice);
+				//invertBIWrapper(cblocks, cthreads, bufferDataDevice, frame.size().width, frame.size().height, dilationDataDevice);
+				display = dilation;
 				//erodeFilterWrapper(cblocks, cthreads, bufferDataDevice, frame.size().width, frame.size().height, 0, 0, ballTemplateOffset, ballTemplate.size().width, ballTemplate.size().height, erosionDataDevice);
 				//display = erosion;
 				break;
@@ -394,13 +395,13 @@ unsigned char *createImageBuffer(unsigned int bytes, unsigned char **devicePtr) 
 }
 
 
-void invertBIWrapper(dim3 blocks, dim3 threads, unsigned char *source, unsigned char *destination)
+void invertBIWrapper(dim3 blocks, dim3 threads, unsigned char *source, int width, int height, unsigned char *destination)
 {
 #if TIME_GPU
 	cudaEventRecord(start);
 #endif
 
-	invertBI << <blocks, threads >> >(source, destination);
+	invertBI << <blocks, threads >> >(source, width, height, destination);
 	cudaDeviceSynchronize();
 
 #if TIME_GPU
@@ -411,20 +412,22 @@ void invertBIWrapper(dim3 blocks, dim3 threads, unsigned char *source, unsigned 
 	std::cout << "Elapsed GPU time: " << ms << " milliseconds" << std::endl;
 #endif
 }
-__global__ void invertBI(unsigned char *source, unsigned char *destination)
+__global__ void invertBI(unsigned char *source, int width, int height, unsigned char *destination)
 {
-	int idx = (blockIdx.x * blockDim.x) + threadIdx.x;
+	int x = (blockIdx.x * blockDim.x) + threadIdx.x;
+	int y = (blockIdx.y * blockDim.y) + threadIdx.y;
+	int i = (y * width) + x;
 
-	destination[idx] = (unsigned char) ( source[idx] > 0 ) ? 0 : 255;
+	destination[i] = (unsigned char) ( source[i] > 0 ) ? 0 : 255;
 }
 
 
-void logicalAndWrapper(dim3 blocks, dim3 threads, unsigned char *a, unsigned char *b, unsigned char *c) {
+void logicalAndWrapper(dim3 blocks, dim3 threads, unsigned char *a, unsigned char *b, unsigned char *c, int width, int height) {
 #if TIME_GPU
 	cudaEventRecord(start);
 #endif
 
-	logicalAnd << <blocks, threads >> >(a, b, c);
+	logicalAnd << <blocks, threads >> >(a, b, c, width, height);
 	cudaDeviceSynchronize();
 
 #if TIME_GPU
@@ -435,11 +438,13 @@ void logicalAndWrapper(dim3 blocks, dim3 threads, unsigned char *a, unsigned cha
 	std::cout << "Elapsed GPU time: " << ms << " milliseconds" << std::endl;
 #endif
 }
-__global__ void logicalAnd(unsigned char *a, unsigned char *b, unsigned char *c)
+__global__ void logicalAnd(unsigned char *a, unsigned char *b, unsigned char *c, int width, int height)
 {
-	int idx = (blockIdx.x * blockDim.x) + threadIdx.x;
+	int x = (blockIdx.x * blockDim.x) + threadIdx.x;
+	int y = (blockIdx.y * blockDim.y) + threadIdx.y;
+	int i = (y * width) + x;
 
-	c[idx] = (unsigned char) ((a[idx]>0) && (b[idx]>0) ? 255 : 0);
+	c[i] = (unsigned char) ((a[i]>0) && (b[i]>0) ? 255 : 0);
 }
 
 
