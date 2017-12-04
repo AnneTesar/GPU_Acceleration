@@ -29,9 +29,12 @@ cudaEvent_t start, stop;
 // convolution kernels
 __constant__ float convolutionKernelStore[256];
 // structuring elements
-__constant__ bool structuringElementStore[256];
+__constant__ bool structuringElementStore[10000];
 
 unsigned char *createImageBuffer(unsigned int bytes, unsigned char **devicePtr);
+
+void logicalAndWrapper(dim3 blocks, dim3 threads, unsigned char *a, unsigned char *b, unsigned char *c);
+__global__ void logicalAnd(unsigned char *a, unsigned char *b, unsigned char *c);
 
 void pythagorasWrapper(dim3 blocks, dim3 threads, unsigned char *a, unsigned char *b, unsigned char *c);
 __global__ void pythagoras(unsigned char *a, unsigned char *b, unsigned char *c);
@@ -48,6 +51,7 @@ __global__ void erodeFilter(unsigned char *source, int width, int height, int pa
 void dilateFilterWrapper(dim3 blocks, dim3 threads, unsigned char *source, int width, int height, int paddingX, int paddingY, size_t kOffset, int kWidth, int kHeight, unsigned char *destination);
 __global__ void dilateFilter(unsigned char *source, int width, int height, int paddingX, int paddingY, size_t kOffset, int kWidth, int kHeight, unsigned char *destination);
 
+void centerOfMass(cv::Point centerPoint, unsigned char *source, int width, int height, int outlierDist, int maxPoints);
 void handleKeypress(cv::Mat frame);
 int keypress;
 int recording, videoName = 1;
@@ -68,6 +72,7 @@ cv::VideoCapture activeCamera = camera_front;
 
 // default calibration threshold
 float threshold = 20;
+int backgroundSet = 0;
 
 int main() {
 	if (!camera_front.isOpened()) {
@@ -83,7 +88,7 @@ int main() {
 
 	cv::Mat frame;
 	cv::Mat background;
-	int backgroundSet = 0;
+
 	recording = 0;
 
 #if TIME_GPU
@@ -189,7 +194,7 @@ int main() {
 		*erosionDataDevice,
 		*dilationDataDevice,
 		*ballTemplateDataDevice,
-		*ballTemplateBufferDataDevice,
+		//*ballTemplateBufferDataDevice,
 		*bufferDataDevice,
 		*displayDataDevice;
 	cv::Mat greyscale1(frame.size(), CV_8U, createImageBuffer(frame.size().width * frame.size().height, &greyscaleDataDevice1));
@@ -202,28 +207,29 @@ int main() {
 	cv::Mat buffer(frame.size(), CV_8U, createImageBuffer(frame.size().width * frame.size().height, &bufferDataDevice));
 	cv::Mat display(frame.size(), CV_8U, createImageBuffer(frame.size().width * frame.size().height, &displayDataDevice));
 
-	int ballTemplateCropRadius = 50;
+	int ballTemplateCropRadius = 40;
 	cv::Size ballTemplateSize((ballTemplateCropRadius * 2) + 1, (ballTemplateCropRadius * 2) + 1);
 	cv::Mat ballTemplate(ballTemplateSize, CV_8U, createImageBuffer(ballTemplateSize.width * ballTemplateSize.height, &ballTemplateDataDevice));
-	cv::Mat ballTemplateBuffer(ballTemplateSize, CV_8U, createImageBuffer(ballTemplateSize.width * ballTemplateSize.height, &ballTemplateBufferDataDevice));
-
+	//cv::Mat ballTemplateBuffer(ballTemplateSize, CV_8U, createImageBuffer(ballTemplateSize.width * ballTemplateSize.height, &ballTemplateBufferDataDevice));
+	cudaMemcpyToSymbol(structuringElementStore, ballTemplateDataDevice, sizeof(ballTemplateDataDevice), binaryCircle7x7Offset + (sizeof(binaryCircle7x7) / sizeof(binaryCircle7x7[0])));
+	const size_t ballTemplateOffset = binaryCircle7x7Offset + (sizeof(binaryCircle7x7) / sizeof(binaryCircle7x7[0]));
 
 	cv::Mat greyscale, greyscalePrev;
 	cv::Mat hsvimage;
 
 	// object HSV thresholds
-	std::vector<unsigned char> lower_hsv = { 170, 150, 91 };
-	std::vector<unsigned char> upper_hsv = { 185, 255, 255 };
+  cv::Vec3b lower_hsv = { 0, 0, 200 };
+	cv::Vec3b upper_hsv = { 255, 255, 255 };
 
 	int greyscaleState = 1;
 	int keypressCur;
 
 	cv::SimpleBlobDetector::Params params;
-	params.filterByArea = true;
-	params.minArea = 10.0;        
-	params.maxArea = 40.0;
-	params.filterByCircularity = true;
-	params.minCircularity = .8;
+	// params.filterByArea = true;
+	// params.minArea = 1;
+	// params.maxArea = 300;
+	params.filterByColor = true;
+	params.blobColor = 255;
 	cv::Ptr<cv::SimpleBlobDetector> detector = cv::SimpleBlobDetector::create(params);
 	std::vector<cv::KeyPoint> keypoints;
 
@@ -246,7 +252,6 @@ int main() {
 		// convert to HSV
 		cv::cvtColor(frame, hsvimage, CV_BGR2HSV);
 		cv::inRange(hsvimage, lower_hsv, upper_hsv, thresholdImage);
-
 
 		dim3 cblocks(frame.size().width / 16, frame.size().height / 16);
 		dim3 cthreads(16, 16);
@@ -274,7 +279,7 @@ int main() {
 					erodeFilterWrapper(cblocks, cthreads, thresholdDataDevice, frame.size().width, frame.size().height, 0, 0, binaryCircle7x7Offset, 7, 7, erosionDataDevice);
 					// dilate
 					dilateFilterWrapper(cblocks, cthreads, erosionDataDevice, frame.size().width, frame.size().height, 0, 0, binaryCircle7x7Offset, 7, 7, dilationDataDevice);
-					
+
 					// blob detector
 					detector->detect(dilation, keypoints);
 					// ignore if multiple blobs found
@@ -299,13 +304,19 @@ int main() {
 							dilation,
 							cv::Range(top, bottom),
 							cv::Range(left, right));
-						ballTemplateBuffer = part;
+						ballTemplate = part;
 
-						//dilateFilterWrapper(cblocks, cthreads, ballTemplateBufferDataDevice, ballTemplateBuffer.size().width, ballTemplateBuffer.size().height, 0, 0, binaryCircle5x5Offset, 5, 5, ballTemplateDataDevice);
-						//cv::imshow("Template", ballTemplate);
-						cv::imshow("Template Buffer", ballTemplateBuffer);
+						cudaMemcpyToSymbol(structuringElementStore, ballTemplateDataDevice, sizeof(ballTemplateDataDevice), ballTemplateOffset);
+
+						char h_range = 15;
+						char s_range = 100;
+						char v_range = 100;
+						cv::Vec3b colorOfBall = hsvimage.at<cv::Vec3b>(centerPoint);
+						lower_hsv = cv::Vec3b(max(colorOfBall[0] - h_range, 0), max(colorOfBall[1] - s_range, 0), max(colorOfBall[2] - v_range, 0));
+						upper_hsv = cv::Vec3b(min(colorOfBall[0] + h_range, 255), min(colorOfBall[1] + s_range, 255), min(colorOfBall[2] + v_range, 255));
 
 
+						cv::imshow("Template Buffer", ballTemplate);
 						cv::circle(buffer, keypoints[0].pt, 40, cv::Scalar(255, 0, 0), 2);
 					}
 					else {
@@ -324,11 +335,12 @@ int main() {
 				}
 				break;
 			case Tracking:
-//				display = thresholdImage;
 				erodeFilterWrapper(cblocks, cthreads, thresholdDataDevice, frame.size().width, frame.size().height, 0, 0, binaryCircle5x5Offset, 5, 5, erosionDataDevice);
-				dilateFilterWrapper(cblocks, cthreads, erosionDataDevice, frame.size().width, frame.size().height, 0, 0, binaryCircle5x5Offset, 5, 5, thresholdDataDevice);
-				dilateFilterWrapper(cblocks, cthreads, thresholdDataDevice, frame.size().width, frame.size().height, 0, 0, binaryCircle5x5Offset, 5, 5, erosionDataDevice);
-				display = erosion;
+				dilateFilterWrapper(cblocks, cthreads, erosionDataDevice, frame.size().width, frame.size().height, 0, 0, binaryCircle5x5Offset, 5, 5, dilationDataDevice);
+				dilateFilterWrapper(cblocks, cthreads, dilationDataDevice, frame.size().width, frame.size().height, 0, 0, binaryCircle5x5Offset, 5, 5, bufferDataDevice);
+				display = buffer;
+				//erodeFilterWrapper(cblocks, cthreads, bufferDataDevice, frame.size().width, frame.size().height, 0, 0, ballTemplateOffset, ballTemplate.size().width, ballTemplate.size().height, erosionDataDevice);
+				//display = erosion;
 				break;
 			default:
 				break;
@@ -360,7 +372,7 @@ int main() {
 	cudaFreeHost(erosion.data);
 	cudaFreeHost(dilation.data);
 	cudaFreeHost(ballTemplate.data);
-	cudaFreeHost(ballTemplateBuffer.data);
+	//cudaFreeHost(ballTemplateBuffer.data);
 	cudaFreeHost(buffer.data);
 	cudaFreeHost(display.data);
 
@@ -377,6 +389,31 @@ unsigned char *createImageBuffer(unsigned int bytes, unsigned char **devicePtr) 
 	cudaHostGetDevicePointer(devicePtr, ptr, 0);
 	return ptr;
 }
+
+void logicalAndWrapper(dim3 blocks, dim3 threads, unsigned char *a, unsigned char *b, unsigned char *c) {
+#if TIME_GPU
+	cudaEventRecord(start);
+#endif
+
+	logicalAnd << <blocks, threads >> >(a, b, c);
+	cudaDeviceSynchronize();
+
+#if TIME_GPU
+	cudaEventRecord(stop);
+	float ms = 0.0f;
+	cudaEventSynchronize(stop);
+	cudaEventElapsedTime(&ms, start, stop);
+	std::cout << "Elapsed GPU time: " << ms << " milliseconds" << std::endl;
+#endif
+
+}
+__global__ void logicalAnd(unsigned char *a, unsigned char *b, unsigned char *c)
+{
+	int idx = (blockIdx.x * blockDim.x) + threadIdx.x;
+
+	c[idx] = (unsigned char) a[idx] & b[idx];
+}
+
 
 void pythagorasWrapper(dim3 blocks, dim3 threads, unsigned char *a, unsigned char *b, unsigned char *c) {
 #if TIME_GPU
@@ -587,6 +624,60 @@ __global__ void dilateFilter(unsigned char *source, int width, int height, int p
 	}
 }
 
+void centerOfMass(cv::Point centerPoint, unsigned char *source, int width, int height, int outlierDist, int maxPoints)
+{
+	// variables
+	std::vector<cv::Point> points; // points that are on
+	float xi, yi, xf, yf; // initial and final center of mass coordinates
+	int pointsInRange; // points contained within the outlier region
+
+	// build point arrays
+	for(int y = 0, pIndex = 0; y < height && pIndex < maxPoints; y++)
+	{
+		for(int x = 0; x < width && pIndex < maxPoints; x++)
+		{
+			if(source[(y*width) + x] > 0)
+			{
+				cv::Point myPoint(x, y);
+				points.push_back( myPoint );
+			}
+		}
+	}
+
+	if( points.size() > 0)
+	{
+		// find initial center of mass
+		for(int i = 0; i < points.size(); i++)
+		{
+			cv::Point p = points[i];
+			xi += p.x;
+			yi += p.y;
+		}
+		xi /= points.size();
+		yi /= points.size();
+
+		// find new center of mass with outlier
+		pointsInRange = 0;
+		for(int i = 0; i < points.size(); i++)
+		{
+			cv::Point p = points[i];
+			if( abs( p.x - xi ) < outlierDist && abs( p.y - yi ) < outlierDist )
+			{
+				xf += p.x;
+				yf += p.y;
+				pointsInRange++;
+			}
+		}
+		xf /= pointsInRange;
+		yf /= pointsInRange;
+
+		centerPoint.x = xf;
+		centerPoint.y = yf;
+	}
+
+	return;
+}
+
 void handleKeypress(cv::Mat frame) {
 	switch (keypress) {
 	case 97: /* a */
@@ -606,6 +697,11 @@ void handleKeypress(cv::Mat frame) {
 		break;
 	case 104: /* h */
 		break;
+
+	case 112: /* p */
+		backgroundSet = 0;
+		break;
+
 
 	case 113: /* q */
 		activeCamera = camera_front;
