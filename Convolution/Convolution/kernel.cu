@@ -21,7 +21,7 @@ Credit and thanks to https://github.com/Teknoman117/cuda/blob/master/imgproc_exa
 
 ////// CONSTANTS
 #define TIME_GPU 0
-#define FRAME_RATIO (0.25)
+#define FRAME_RATIO (1.0)
 #define OBJ_TEMPLATE_WIDTH (40 * FRAME_RATIO)
 #define OBJ_TEMPLATE_HEIGHT (40 * FRAME_RATIO)
 #define OBJ_H_RANGE (15)
@@ -30,34 +30,53 @@ Credit and thanks to https://github.com/Teknoman117/cuda/blob/master/imgproc_exa
 
 ////// GPU CONSTANTS
 __constant__ float convolutionKernelStore[256];
-__constant__ unsigned char structuringElementStore[10000];
+__constant__ unsigned char structuringElementStore[16000];
 
 ////// PROTOTYPES
 unsigned char *createImageBuffer(unsigned int bytes, unsigned char **devicePtr);
-void centerOfMass(cv::Point centerPoint, unsigned char *source, int width, int height, int outlierDist, int maxPoints);
+cv::Point centerOfMass(unsigned char *src, int width, int height, float outlierDist, int maxPoints);
 void handleKeypress(int keypress, cv::Mat frame);
+void manualCopy(unsigned char *src, int srcW, int srcH, int startX, int startY, unsigned char *dest, int destW, int destH)
+{
+	for (int destY = 0; destY < destH; destY++)
+	{
+		for (int destX = 0; destX < destW; destX++)
+		{
+			int srcX = startX + destX;
+			int srcY = startY + destY;
+			if (srcX < srcW && srcY < srcH)
+			{
+				dest[(destY*destW) + destX] = src[(srcY*srcW) + srcX];
+			}
+			else
+			{
+				dest[(destY*destW) + destX] = 0;
+			}
+		}
+	}
+}
 
 ////// GPU PROTOTYPES
-void invertBIWrapper(dim3 blocks, dim3 threads, unsigned char *source, int width, int height, unsigned char *destination);
-__global__ void invertBI(unsigned char *source, int width, int height, unsigned char *destination);
+void invertBIWrapper(dim3 blocks, dim3 threads, unsigned char *src, int width, int height, unsigned char *dest);
+__global__ void invertBI(unsigned char *src, int width, int height, unsigned char *dest);
 
-void logicalAndWrapper(dim3 blocks, dim3 threads, unsigned char *a, unsigned char *b, unsigned char *c, int width, int height);
-__global__ void logicalAnd(unsigned char *a, unsigned char *b, unsigned char *c, int width, int height);
+void logicalAndWrapper(dim3 blocks, dim3 threads, unsigned char *src1, unsigned char *src2, unsigned char *dest, int width, int height);
+__global__ void logicalAnd(unsigned char *src1, unsigned char *src2, unsigned char *dest, int width, int height);
 
 void pythagorasWrapper(dim3 blocks, dim3 threads, unsigned char *a, unsigned char *b, unsigned char *c);
 __global__ void pythagoras(unsigned char *a, unsigned char *b, unsigned char *c);
 
-void convolveWrapper(dim3 blocks, dim3 threads, unsigned char *source, int width, int height, int paddingX, int paddingY, size_t kOffset, int kWidth, int kHeight, unsigned char *destination);
-__global__ void convolve(unsigned char *source, int width, int height, int paddingX, int paddingY, size_t kOffset, int kWidth, int kHeight, unsigned char *destination);
+void convolveWrapper(dim3 blocks, dim3 threads, unsigned char *src, int width, int height, int paddingX, int paddingY, size_t kOffset, int kWidth, int kHeight, unsigned char *dest);
+__global__ void convolve(unsigned char *src, int width, int height, int paddingX, int paddingY, size_t kOffset, int kWidth, int kHeight, unsigned char *dest);
 
-void subtractImagesWrapper(dim3 blocks, dim3 threads, unsigned char *img1, unsigned char *img2, int width, int height, float threshold, unsigned char *destination);
-__global__ void subtractImages(unsigned char *img1, unsigned char *img2, int width, int height, float threshold, unsigned char *destination);
+void subtractImagesWrapper(dim3 blocks, dim3 threads, unsigned char *img1, unsigned char *img2, int width, int height, float threshold, unsigned char *dest);
+__global__ void subtractImages(unsigned char *img1, unsigned char *img2, int width, int height, float threshold, unsigned char *dest);
 
-void erodeFilterWrapper(dim3 blocks, dim3 threads, unsigned char *source, int width, int height, int paddingX, int paddingY, size_t kOffset, int kWidth, int kHeight, unsigned char *destination);
-__global__ void erodeFilter(unsigned char *source, int width, int height, int paddingX, int paddingY, size_t kOffset, int kWidth, int kHeight, unsigned char *destination);
+void erodeFilterWrapper(dim3 blocks, dim3 threads, unsigned char *src, int width, int height, int paddingX, int paddingY, size_t kOffset, int kWidth, int kHeight, unsigned char *dest);
+__global__ void erodeFilter(unsigned char *src, int width, int height, int paddingX, int paddingY, size_t kOffset, int kWidth, int kHeight, unsigned char *dest);
 
-void dilateFilterWrapper(dim3 blocks, dim3 threads, unsigned char *source, int width, int height, int paddingX, int paddingY, size_t kOffset, int kWidth, int kHeight, unsigned char *destination);
-__global__ void dilateFilter(unsigned char *source, int width, int height, int paddingX, int paddingY, size_t kOffset, int kWidth, int kHeight, unsigned char *destination);
+void dilateFilterWrapper(dim3 blocks, dim3 threads, unsigned char *src, int width, int height, int paddingX, int paddingY, size_t kOffset, int kWidth, int kHeight, unsigned char *dest);
+__global__ void dilateFilter(unsigned char *src, int width, int height, int paddingX, int paddingY, size_t kOffset, int kWidth, int kHeight, unsigned char *dest);
 
 ////// ENUMS
 enum Operations {
@@ -183,11 +202,16 @@ int main() {
 	structuringElementStoreEndOffset += sizeof(binaryCircle7x7) / sizeof(unsigned char);
 
 	// object template setup
-	unsigned char *objTemplateDataDevice;
 	cv::Size objTemplateSize((OBJ_TEMPLATE_WIDTH * 2) + 1, (OBJ_TEMPLATE_HEIGHT * 2) + 1);
-	cv::Mat objTemplate(objTemplateSize, CV_8U, createImageBuffer(objTemplateSize.width * objTemplateSize.height, &objTemplateDataDevice));
-	const size_t objTemplateOffset = structuringElementStoreEndOffset;
-	cudaMemcpyToSymbol(structuringElementStore, objTemplate.data, sizeof(objTemplate.data), objTemplateOffset * sizeof(unsigned char));
+	unsigned char *objTemplate1DataDevice, *objTemplate2DataDevice, *objTemplate3DataDevice, *objTemplate4DataDevice;
+	cv::Mat objTemplate1(objTemplateSize, CV_8U, createImageBuffer(objTemplateSize.width * objTemplateSize.height, &objTemplate1DataDevice));
+	cv::Mat objTemplate2(objTemplateSize, CV_8U, createImageBuffer(objTemplateSize.width * objTemplateSize.height, &objTemplate2DataDevice));
+	cv::Mat objTemplate3(objTemplateSize, CV_8U, createImageBuffer(objTemplateSize.width * objTemplateSize.height, &objTemplate3DataDevice));
+	cv::Mat objTemplate4(objTemplateSize, CV_8U, createImageBuffer(objTemplateSize.width * objTemplateSize.height, &objTemplate4DataDevice));
+	const size_t objTemplate1Offset = structuringElementStoreEndOffset;
+	structuringElementStoreEndOffset += sizeof(objTemplate1.data) / sizeof(unsigned char);
+	const size_t objTemplate2Offset = structuringElementStoreEndOffset;
+	structuringElementStoreEndOffset += sizeof(objTemplate2.data) / sizeof(unsigned char);
 
 	////// VARIABLES
 	int greyscaleState = 1;
@@ -305,8 +329,8 @@ int main() {
 					// open to remove noise
 					erodeFilterWrapper(cblocks, cthreads, buffer2.data, frame.size().width, frame.size().height, 0, 0, binaryCircle5x5Offset, 5, 5, buffer1.data);
 					dilateFilterWrapper(cblocks, cthreads, buffer1.data, frame.size().width, frame.size().height, 0, 0, binaryCircle5x5Offset, 5, 5, buffer2.data);
-					dilateFilterWrapper(cblocks, cthreads, buffer2.data, frame.size().width, frame.size().height, 0, 0, binaryCircle5x5Offset, 5, 5, buffer1.data);
-					dilateFilterWrapper(cblocks, cthreads, buffer1.data, frame.size().width, frame.size().height, 0, 0, binaryCircle5x5Offset, 5, 5, buffer2.data);
+					//dilateFilterWrapper(cblocks, cthreads, buffer2.data, frame.size().width, frame.size().height, 0, 0, binaryCircle5x5Offset, 5, 5, buffer1.data);
+					//dilateFilterWrapper(cblocks, cthreads, buffer1.data, frame.size().width, frame.size().height, 0, 0, binaryCircle5x5Offset, 5, 5, buffer2.data);
 
 					display = buffer2;
 
@@ -320,6 +344,7 @@ int main() {
 						std::cout << "just one keypoint found - " << keypoints[0].pt << std::endl;
 						// grab the center
 						cv::Point centerPoint = keypoints[0].pt;
+
 						// pick bounds for blob template
 						int left = floor(centerPoint.x) - OBJ_TEMPLATE_WIDTH;
 						if (left < 0) left = 0;
@@ -334,16 +359,34 @@ int main() {
 							display,
 							cv::Range(top, bottom),
 							cv::Range(left, right));
-						objTemplate = part;
+						//objTemplate1 = part;
+						//objTemplate2 = part;
+						//memcpy(objTemplate1.data, part.data, objTemplate1.size().width * objTemplate1.size().height);
+						//memcpy(objTemplate2.data, part.data, objTemplate2.size().width * objTemplate2.size().height);
+						manualCopy(display.data, display.size().width, display.size().height, left, top, objTemplate1.data, objTemplate1.size().width, objTemplate1.size().height);
 						// copy the template into the structuring element store
-						cudaMemcpyToSymbol(structuringElementStore, objTemplate.data, sizeof(objTemplate.data), objTemplateOffset);
+						cudaMemcpyToSymbol(structuringElementStore, objTemplate1.data, sizeof(objTemplate1.data), objTemplate1Offset * sizeof(unsigned char));
+						cv::imshow("Template Buffer1", objTemplate1);
+						// build the donut template
+						// dilate to get bigger object
+						dilateFilterWrapper(cblocks, cthreads, objTemplate1.data, objTemplate1.size().width, objTemplate1.size().height, 0, 0, binaryCircle5x5Offset, 5, 5, objTemplate2.data);
+						//cv::imshow("Template Buffer dilate", objTemplate2);
+						dilateFilterWrapper(cblocks, cthreads, objTemplate2.data, objTemplate2.size().width, objTemplate2.size().height, 0, 0, binaryCircle5x5Offset, 5, 5, objTemplate3.data);
+						cv::imshow("Template Buffer dilate2", objTemplate3);
+						// invert the original object and AND with bigger to get donut
+						invertBIWrapper(cblocks, cthreads, objTemplate1.data, objTemplate1.size().width, objTemplate1.size().height, objTemplate2.data);
+						cv::imshow("Template Buffer1 inverted", objTemplate2);
+						cv::imshow("Template Buffer1 before and", objTemplate1);
+						logicalAndWrapper(cblocks, cthreads, objTemplate2.data, objTemplate3.data, objTemplate4.data, objTemplate2.size().width, objTemplate2.size().height);
+						cv::imshow("Template Buffer anded", objTemplate4);
+						// copy the template into the structuring element store
+						cudaMemcpyToSymbol(structuringElementStore, objTemplate4.data, sizeof(objTemplate4.data), objTemplate2Offset * sizeof(unsigned char));
+
 						// find the object's color
 						cv::Vec3b colorOfObj = hsvImage.at<cv::Vec3b>(centerPoint);
 						lower_hsv = cv::Vec3b(max(colorOfObj[0] - OBJ_H_RANGE, 0), max(colorOfObj[1] - OBJ_S_RANGE, 0), max(colorOfObj[2] - OBJ_V_RANGE, 0));
 						upper_hsv = cv::Vec3b(min(colorOfObj[0] + OBJ_H_RANGE, 255), min(colorOfObj[1] + OBJ_S_RANGE, 255), min(colorOfObj[2] + OBJ_V_RANGE, 255));
 
-
-						cv::imshow("Template Buffer", objTemplate);
 						cv::circle(display, keypoints[0].pt, 40, cv::Scalar(255, 0, 0), 2);
 					}
 					else {
@@ -361,15 +404,23 @@ int main() {
 				}
 				break;
 			case Tracking:
+			{
 				// threshold on object color
 				cv::inRange(hsvImage, lower_hsv, upper_hsv, thresholdImage);
 				// open the image to reduce noise
 				erodeFilterWrapper(cblocks, cthreads, thresholdImage.data, frame.size().width, frame.size().height, 0, 0, binaryCircle5x5Offset, 5, 5, buffer1.data);
 				dilateFilterWrapper(cblocks, cthreads, buffer1.data, frame.size().width, frame.size().height, 0, 0, binaryCircle5x5Offset, 5, 5, buffer2.data);
 				// erode by object template
-				erodeFilterWrapper(cblocks, cthreads, buffer2.data, frame.size().width, frame.size().height, 0, 0, objTemplateOffset, objTemplate.size().width, objTemplate.size().height, buffer1.data);
+				//erodeFilterWrapper(cblocks, cthreads, buffer2.data, frame.size().width, frame.size().height, 0, 0, objTemplate1Offset, objTemplate1.size().width, objTemplate1.size().height, buffer1.data);
 				display = buffer1;
+
+				// find the center of mass
+				cv::Point objCenter = centerOfMass(buffer2.data, frame.size().width, frame.size().height, OBJ_TEMPLATE_HEIGHT + 10, OBJ_TEMPLATE_WIDTH * OBJ_TEMPLATE_HEIGHT);
+				memset(buffer1.data, 0, buffer1.size().width*buffer1.size().height);
+				cv::circle(buffer1, objCenter, 40, cv::Scalar(255, 0, 0), 2);
+
 				break;
+			}
 			default:
 				break;
 			}
@@ -400,7 +451,8 @@ int main() {
 	cudaFreeHost(backgroundGreyscale.data);
 	cudaFreeHost(backgroundGreyscaleBlurred.data);
 	cudaFreeHost(thresholdImage.data);
-	cudaFreeHost(objTemplate.data);
+	cudaFreeHost(objTemplate1.data);
+	cudaFreeHost(objTemplate2.data);
 	cudaFreeHost(buffer1.data);
 	cudaFreeHost(buffer2.data);
 	cudaFreeHost(display.data);
@@ -420,13 +472,13 @@ unsigned char *createImageBuffer(unsigned int bytes, unsigned char **devicePtr) 
 }
 
 
-void invertBIWrapper(dim3 blocks, dim3 threads, unsigned char *source, int width, int height, unsigned char *destination)
+void invertBIWrapper(dim3 blocks, dim3 threads, unsigned char *src, int width, int height, unsigned char *dest)
 {
 #if TIME_GPU
 	cudaEventRecord(start);
 #endif
 
-	invertBI << <blocks, threads >> >(source, width, height, destination);
+	invertBI << <blocks, threads >> >(src, width, height, dest);
 	cudaDeviceSynchronize();
 
 #if TIME_GPU
@@ -437,22 +489,22 @@ void invertBIWrapper(dim3 blocks, dim3 threads, unsigned char *source, int width
 	std::cout << "Elapsed GPU time: " << ms << " milliseconds" << std::endl;
 #endif
 }
-__global__ void invertBI(unsigned char *source, int width, int height, unsigned char *destination)
+__global__ void invertBI(unsigned char *src, int width, int height, unsigned char *dest)
 {
 	int x = (blockIdx.x * blockDim.x) + threadIdx.x;
 	int y = (blockIdx.y * blockDim.y) + threadIdx.y;
 	int i = (y * width) + x;
 
-	destination[i] = (unsigned char) ( source[i] > 0 ) ? 0 : 255;
+	dest[i] = ( src[i] > 0 ) ? 0 : 255;
 }
 
 
-void logicalAndWrapper(dim3 blocks, dim3 threads, unsigned char *a, unsigned char *b, unsigned char *c, int width, int height) {
+void logicalAndWrapper(dim3 blocks, dim3 threads, unsigned char *src1, unsigned char *src2, unsigned char *dest, int width, int height) {
 #if TIME_GPU
 	cudaEventRecord(start);
 #endif
 
-	logicalAnd << <blocks, threads >> >(a, b, c, width, height);
+	logicalAnd << <blocks, threads >> >(src1, src2, dest, width, height);
 	cudaDeviceSynchronize();
 
 #if TIME_GPU
@@ -463,13 +515,13 @@ void logicalAndWrapper(dim3 blocks, dim3 threads, unsigned char *a, unsigned cha
 	std::cout << "Elapsed GPU time: " << ms << " milliseconds" << std::endl;
 #endif
 }
-__global__ void logicalAnd(unsigned char *a, unsigned char *b, unsigned char *c, int width, int height)
+__global__ void logicalAnd(unsigned char *src1, unsigned char *src2, unsigned char *dest, int width, int height)
 {
 	int x = (blockIdx.x * blockDim.x) + threadIdx.x;
 	int y = (blockIdx.y * blockDim.y) + threadIdx.y;
 	int i = (y * width) + x;
 
-	c[i] = (unsigned char) ((a[i]>0) && (b[i]>0) ? 255 : 0);
+	dest[i] = ((src1[i] > 0) && (src2[i] > 0)) ? 255 : 0;
 }
 
 
@@ -502,12 +554,12 @@ __global__ void pythagoras(unsigned char *a, unsigned char *b, unsigned char *c)
 }
 
 
-void convolveWrapper(dim3 blocks, dim3 threads, unsigned char *source, int width, int height, int paddingX, int paddingY, size_t kOffset, int kWidth, int kHeight, unsigned char *destination) {
+void convolveWrapper(dim3 blocks, dim3 threads, unsigned char *src, int width, int height, int paddingX, int paddingY, size_t kOffset, int kWidth, int kHeight, unsigned char *dest) {
 #if TIME_GPU
 	cudaEventRecord(start);
 #endif
 
-	convolve << <blocks, threads >> > (source, width, height, paddingX, paddingY, kOffset, kWidth, kHeight, destination);
+	convolve << <blocks, threads >> > (src, width, height, paddingX, paddingY, kOffset, kWidth, kHeight, dest);
 	cudaDeviceSynchronize();
 
 #if TIME_GPU
@@ -518,7 +570,7 @@ void convolveWrapper(dim3 blocks, dim3 threads, unsigned char *source, int width
 	std::cout << "Elapsed GPU time: " << ms << " milliseconds" << std::endl;
 #endif
 }
-__global__ void convolve(unsigned char *source, int width, int height, int paddingX, int paddingY, size_t kOffset, int kWidth, int kHeight, unsigned char *destination) {
+__global__ void convolve(unsigned char *src, int width, int height, int paddingX, int paddingY, size_t kOffset, int kWidth, int kHeight, unsigned char *dest) {
 
 	int x = (blockIdx.x * blockDim.x) + threadIdx.x;
 	int y = (blockIdx.y * blockDim.y) + threadIdx.y;
@@ -543,21 +595,21 @@ __global__ void convolve(unsigned char *source, int width, int height, int paddi
 				float w = convolutionKernelStore[(kj * kWidth) + ki + kOffset];
 
 
-				sum += w * float(source[((y + j) * width) + (x + i)]);
+				sum += w * float(src[((y + j) * width) + (x + i)]);
 			}
 		}
 	}
 
-	destination[(y * width) + x] = (unsigned char)sum;
+	dest[(y * width) + x] = (unsigned char)sum;
 }
 
 
-void subtractImagesWrapper(dim3 blocks, dim3 threads, unsigned char *img1, unsigned char *img2, int width, int height, float threshold, unsigned char *destination) {
+void subtractImagesWrapper(dim3 blocks, dim3 threads, unsigned char *img1, unsigned char *img2, int width, int height, float threshold, unsigned char *dest) {
 #if TIME_GPU
 	cudaEventRecord(start);
 #endif
 
-	subtractImages << <blocks, threads >> > (img1, img2, width, height, threshold, destination);
+	subtractImages << <blocks, threads >> > (img1, img2, width, height, threshold, dest);
 	cudaDeviceSynchronize();
 
 #if TIME_GPU
@@ -568,27 +620,27 @@ void subtractImagesWrapper(dim3 blocks, dim3 threads, unsigned char *img1, unsig
 	std::cout << "Elapsed GPU time: " << ms << " milliseconds" << std::endl;
 #endif
 }
-__global__ void subtractImages(unsigned char *img1, unsigned char *img2, int width, int height, float threshold, unsigned char *destination) {
+__global__ void subtractImages(unsigned char *img1, unsigned char *img2, int width, int height, float threshold, unsigned char *dest) {
 
 	int x = (blockIdx.x * blockDim.x) + threadIdx.x;
 	int y = (blockIdx.y * blockDim.y) + threadIdx.y;
 
 	float pixelDifference = abs(img1[(y * width) + x] - img2[(y * width) + x]);
 	if (pixelDifference > threshold) {
-		destination[(y * width) + x] = 255;
+		dest[(y * width) + x] = 255;
 	}
 	else {
-		destination[(y * width) + x] = 0;
+		dest[(y * width) + x] = 0;
 	}
 }
 
 
-void erodeFilterWrapper(dim3 blocks, dim3 threads, unsigned char *source, int width, int height, int paddingX, int paddingY, size_t kOffset, int kWidth, int kHeight, unsigned char *destination) {
+void erodeFilterWrapper(dim3 blocks, dim3 threads, unsigned char *src, int width, int height, int paddingX, int paddingY, size_t kOffset, int kWidth, int kHeight, unsigned char *dest) {
 #if TIME_GPU
 	cudaEventRecord(start);
 #endif
 
-	erodeFilter << <blocks, threads >> > (source, width, height, paddingX, paddingY, kOffset, kWidth, kHeight, destination);
+	erodeFilter << <blocks, threads >> > (src, width, height, paddingX, paddingY, kOffset, kWidth, kHeight, dest);
 	cudaDeviceSynchronize();
 
 #if TIME_GPU
@@ -599,7 +651,7 @@ void erodeFilterWrapper(dim3 blocks, dim3 threads, unsigned char *source, int wi
 	std::cout << "Elapsed GPU time: " << ms << " milliseconds" << std::endl;
 #endif
 }
-__global__ void erodeFilter(unsigned char *source, int width, int height, int paddingX, int paddingY, size_t kOffset, int kWidth, int kHeight, unsigned char *destination)
+__global__ void erodeFilter(unsigned char *src, int width, int height, int paddingX, int paddingY, size_t kOffset, int kWidth, int kHeight, unsigned char *dest)
 {
 	int x = (blockIdx.x * blockDim.x) + threadIdx.x;
 	int y = (blockIdx.y * blockDim.y) + threadIdx.y;
@@ -624,21 +676,21 @@ __global__ void erodeFilter(unsigned char *source, int width, int height, int pa
 				bool w = (structuringElementStore[(kj * kWidth) + ki + kOffset] > 0);
 				if (w)
 				{
-					erode = !(source[((y + j) * width) + (x + i)] > 0);
+					erode = !(src[((y + j) * width) + (x + i)] > 0);
 				}
 			}
 		}
 	}
 
-	destination[(y * width) + x] = (erode) ? 0 : 255;
+	dest[(y * width) + x] = (erode) ? 0 : 255;
 }
 
-void dilateFilterWrapper(dim3 blocks, dim3 threads, unsigned char *source, int width, int height, int paddingX, int paddingY, size_t kOffset, int kWidth, int kHeight, unsigned char *destination) {
+void dilateFilterWrapper(dim3 blocks, dim3 threads, unsigned char *src, int width, int height, int paddingX, int paddingY, size_t kOffset, int kWidth, int kHeight, unsigned char *dest) {
 #if TIME_GPU
 	cudaEventRecord(start);
 #endif
-	memset(destination, 0, width*height);
-	dilateFilter << <blocks, threads >> > (source, width, height, paddingX, paddingY, kOffset, kWidth, kHeight, destination);
+	memset(dest, 0, width*height);
+	dilateFilter << <blocks, threads >> > (src, width, height, paddingX, paddingY, kOffset, kWidth, kHeight, dest);
 	cudaDeviceSynchronize();
 
 #if TIME_GPU
@@ -649,7 +701,7 @@ void dilateFilterWrapper(dim3 blocks, dim3 threads, unsigned char *source, int w
 	std::cout << "Elapsed GPU time: " << ms << " milliseconds" << std::endl;
 #endif
 }
-__global__ void dilateFilter(unsigned char *source, int width, int height, int paddingX, int paddingY, size_t kOffset, int kWidth, int kHeight, unsigned char *destination)
+__global__ void dilateFilter(unsigned char *src, int width, int height, int paddingX, int paddingY, size_t kOffset, int kWidth, int kHeight, unsigned char *dest)
 {
 	int x = (blockIdx.x * blockDim.x) + threadIdx.x;
 	int y = (blockIdx.y * blockDim.y) + threadIdx.y;
@@ -664,7 +716,7 @@ __global__ void dilateFilter(unsigned char *source, int width, int height, int p
 		y < (blockDim.y * gridDim.y) - pHeight - paddingY)
 	{
 		// is this pixel on?
-		if (source[(y * width) + x] > 0)
+		if (src[(y * width) + x] > 0)
 		{
 			// Dilate!!!
 			for (int j = -pHeight; j <= pHeight; j++)
@@ -675,7 +727,7 @@ __global__ void dilateFilter(unsigned char *source, int width, int height, int p
 					int kj = (j + pHeight);
 					if (structuringElementStore[(kj * kWidth) + ki + kOffset] > 0)
 					{
-						destination[((y + j) * width) + (x + i)] = 255;
+						dest[((y + j) * width) + (x + i)] = 255;
 					}
 				}
 			}
@@ -683,11 +735,11 @@ __global__ void dilateFilter(unsigned char *source, int width, int height, int p
 	}
 }
 
-void centerOfMass(cv::Point centerPoint, unsigned char *source, int width, int height, int outlierDist, int maxPoints)
+cv::Point centerOfMass(unsigned char *src, int width, int height, float outlierDist, int maxPoints)
 {
 	// variables
 	std::vector<cv::Point> points; // points that are on
-	float xi, yi, xf, yf; // initial and final center of mass coordinates
+	float xi = 0.0, yi = 0.0, xf = 0.0, yf = 0.0; // initial and final center of mass coordinates
 	int pointsInRange; // points contained within the outlier region
 
 	// build point arrays
@@ -695,7 +747,7 @@ void centerOfMass(cv::Point centerPoint, unsigned char *source, int width, int h
 	{
 		for(int x = 0; x < width && pIndex < maxPoints; x++)
 		{
-			if(source[(y*width) + x] > 0)
+			if(src[(y*width) + x] > 0)
 			{
 				cv::Point myPoint(x, y);
 				points.push_back( myPoint );
@@ -730,11 +782,11 @@ void centerOfMass(cv::Point centerPoint, unsigned char *source, int width, int h
 		xf /= pointsInRange;
 		yf /= pointsInRange;
 
-		centerPoint.x = xf;
-		centerPoint.y = yf;
+		
 	}
 
-	return;
+	cv::Point centerPoint(xf, yf);
+	return centerPoint;
 }
 
 void handleKeypress(int keypress, cv::Mat frame) {
@@ -833,11 +885,11 @@ unsigned char *createImageBuffer(unsigned int bytes, unsigned char **devicePtr);
 void pythagorasWrapper(dim3 blocks, dim3 threads, unsigned char *a, unsigned char *b, unsigned char *c);
 __global__ void pythagoras(unsigned char *a, unsigned char *b, unsigned char *c);
 
-void convolveWrapper(dim3 blocks, dim3 threads, unsigned char *source, int width, int height, int paddingX, int paddingY, size_t kOffset, int kWidth, int kHeight, unsigned char *destination);
-__global__ void convolve(unsigned char *source, int width, int height, int paddingX, int paddingY, size_t kOffset, int kWidth, int kHeight, unsigned char *destination);
+void convolveWrapper(dim3 blocks, dim3 threads, unsigned char *src, int width, int height, int paddingX, int paddingY, size_t kOffset, int kWidth, int kHeight, unsigned char *dest);
+__global__ void convolve(unsigned char *src, int width, int height, int paddingX, int paddingY, size_t kOffset, int kWidth, int kHeight, unsigned char *dest);
 
 void pythagoras_slow(unsigned char *a, unsigned char *b, unsigned char *c, int width, int height);
-void convolve_slow(unsigned char *source, int width, int height, int paddingX, int paddingY, size_t kOffset, int kWidth, int kHeight, const float *kernel, unsigned char *destination);
+void convolve_slow(unsigned char *src, int width, int height, int paddingX, int paddingY, size_t kOffset, int kWidth, int kHeight, const float *kernel, unsigned char *dest);
 
 void handleKeypress();
 int keypress;
@@ -1080,12 +1132,12 @@ __global__ void pythagoras(unsigned char *a, unsigned char *b, unsigned char *c)
 }
 
 
-void convolveWrapper(dim3 blocks, dim3 threads, unsigned char *source, int width, int height, int paddingX, int paddingY, size_t kOffset, int kWidth, int kHeight, unsigned char *destination) {
+void convolveWrapper(dim3 blocks, dim3 threads, unsigned char *src, int width, int height, int paddingX, int paddingY, size_t kOffset, int kWidth, int kHeight, unsigned char *dest) {
 #if TIME_GPU
 	cudaEventRecord(start);
 #endif
 
-	convolve << <blocks, threads >> > (source, width, height, paddingX, paddingY, kOffset, kWidth, kHeight, destination);
+	convolve << <blocks, threads >> > (src, width, height, paddingX, paddingY, kOffset, kWidth, kHeight, dest);
 	cudaDeviceSynchronize();
 
 #if TIME_GPU
@@ -1096,7 +1148,7 @@ void convolveWrapper(dim3 blocks, dim3 threads, unsigned char *source, int width
 	std::cout << "Elapsed GPU time: " << ms << " milliseconds" << std::endl;
 #endif
 }
-__global__ void convolve(unsigned char *source, int width, int height, int paddingX, int paddingY, size_t kOffset, int kWidth, int kHeight, unsigned char *destination) {
+__global__ void convolve(unsigned char *src, int width, int height, int paddingX, int paddingY, size_t kOffset, int kWidth, int kHeight, unsigned char *dest) {
 
 	int x = (blockIdx.x * blockDim.x) + threadIdx.x;
 	int y = (blockIdx.y * blockDim.y) + threadIdx.y;
@@ -1121,12 +1173,12 @@ __global__ void convolve(unsigned char *source, int width, int height, int paddi
 				float w = convolutionKernelStore[(kj * kWidth) + ki + kOffset];
 
 
-				sum += w * float(source[((y + j) * width) + (x + i)]);
+				sum += w * float(src[((y + j) * width) + (x + i)]);
 			}
 		}
 	}
 
-	destination[(y * width) + x] = (unsigned char)sum;
+	dest[(y * width) + x] = (unsigned char)sum;
 }
 
 
@@ -1141,13 +1193,13 @@ void pythagoras_slow(unsigned char *a, unsigned char *b, unsigned char *c, int w
 
 }
 
-void convolve_slow(unsigned char *source, int width, int height, int paddingX, int paddingY, size_t kOffset, int kWidth, int kHeight, const float *kernel, unsigned char *destination) {
+void convolve_slow(unsigned char *src, int width, int height, int paddingX, int paddingY, size_t kOffset, int kWidth, int kHeight, const float *kernel, unsigned char *dest) {
 
 	/*for (int y = 0; y < height; y++)
 	{
 	for (int x = 0; x < width; x++)
 	{
-	source[(y * width) + x]
+	src[(y * width) + x]
 	}*/
 	for (int k = 0; k < width * height; k++) {
 		float sum = 0.0;
@@ -1167,10 +1219,10 @@ void convolve_slow(unsigned char *source, int width, int height, int paddingX, i
 					// Sample the weight for this location
 					float w = kernel[(j * kWidth) + i];
 
-					sum += w * source[((y + j) * width) + (x + i)];
+					sum += w * src[((y + j) * width) + (x + i)];
 
 					/*if ((k > 2000) && (k < 2010)) {
-					std::cout << "Kernel Index " << (int)(kj * kWidth) + ki << "   val at Kernel Index " << w <<  "    K " << k <<  "   Source Index " << ((y + j) * width) + (x + i) << "    Sum " << sum << std::endl;
+					std::cout << "Kernel Index " << (int)(kj * kWidth) + ki << "   val at Kernel Index " << w <<  "    K " << k <<  "   src Index " << ((y + j) * width) + (x + i) << "    Sum " << sum << std::endl;
 					}*/
 				}
 			}
@@ -1178,9 +1230,9 @@ void convolve_slow(unsigned char *source, int width, int height, int paddingX, i
 
 		sum = (sum < 0) ? 0 : sum;
 		sum = (sum > 255) ? 255 : sum;
-		destination[k] = sum;
+		dest[k] = sum;
 		/*if ((k > 2000) && (k < 2010)) {
-		std::cout << (int) source[k] << "    " << (int) destination[k] << "    " << std::endl;
+		std::cout << (int) src[k] << "    " << (int) dest[k] << "    " << std::endl;
 		}*/
 	}
 }
