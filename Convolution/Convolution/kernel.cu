@@ -67,7 +67,7 @@ cv::VideoCapture camera_usb(2);
 cv::VideoCapture activeCamera = camera_front;
 
 // default calibration threshold
-float threshold = 50;
+float threshold = 20;
 
 int main() {
 	if (!camera_front.isOpened()) {
@@ -220,10 +220,10 @@ int main() {
 
 	cv::SimpleBlobDetector::Params params;
 	params.filterByArea = true;
-	params.minArea = 5.0;        
-	params.maxArea = 80.0;
-	//params.filterByCircularity = true;
-	//params.minCircularity = .8;
+	params.minArea = 10.0;        
+	params.maxArea = 40.0;
+	params.filterByCircularity = true;
+	params.minCircularity = .8;
 	cv::Ptr<cv::SimpleBlobDetector> detector = cv::SimpleBlobDetector::create(params);
 	std::vector<cv::KeyPoint> keypoints;
 
@@ -296,7 +296,7 @@ int main() {
 						if (bottom > frame.size().height - 1) bottom = frame.size().height - 1;
 						// build the template
 						cv::Mat part(
-							thresholdImage,
+							dilation,
 							cv::Range(top, bottom),
 							cv::Range(left, right));
 						ballTemplateBuffer = part;
@@ -541,7 +541,7 @@ void dilateFilterWrapper(dim3 blocks, dim3 threads, unsigned char *source, int w
 #if TIME_GPU
 	cudaEventRecord(start);
 #endif
-
+	memset(destination, 0, width*height);
 	dilateFilter << <blocks, threads >> > (source, width, height, paddingX, paddingY, kOffset, kWidth, kHeight, destination);
 	cudaDeviceSynchronize();
 
