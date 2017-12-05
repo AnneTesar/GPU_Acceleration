@@ -190,14 +190,14 @@ int main() {
 	
 	// object hsv thresholds
 	// blue ball
-//	cv::Vec3b lower_hsv = { 88, 109, 0 };
-//	cv::Vec3b upper_hsv = { 118, 255, 199 };
+	cv::Vec3b lower_hsv = { 88, 109, 0 };
+	cv::Vec3b upper_hsv = { 118, 255, 199 };
 	// red ball
-	cv::Vec3b lower_hsv = { 162, 44, 84 };
-	cv::Vec3b upper_hsv = { 192, 244, 255 };
+//	cv::Vec3b lower_hsv = { 162, 44, 84 };
+//	cv::Vec3b upper_hsv = { 192, 244, 255 };
 	// tennis ball
-	lower_hsv - [25, 123, 161]
-	upper_hsv - [29, 154, 212]
+//	lower_hsv - [25, 123, 161]
+//	upper_hsv - [29, 154, 212]
 
 	// old blue ball
 	//lower_hsv - [98, 80, 35]
@@ -407,10 +407,12 @@ int main() {
 			{
 				// threshold on object color
 				cv::inRange(hsvImage, lower_hsv, upper_hsv, thresholdImage);
+				cv::imshow("threshold", thresholdImage);
 				// open the image to reduce noise
 				erodeFilterWrapper(cblocks, cthreads, thresholdImage.data, frame.size().width, frame.size().height, 0, 0, binaryCircle5x5Offset, 5, 5, buffer1.data);
 				dilateFilterWrapper(cblocks, cthreads, buffer1.data, frame.size().width, frame.size().height, 0, 0, binaryCircle5x5Offset, 5, 5, buffer2.data);
 				dilateFilterWrapper(cblocks, cthreads, buffer2.data, frame.size().width, frame.size().height, 0, 0, binaryCircle5x5Offset, 5, 5, buffer1.data);
+				cv::imshow("dilate, erode", buffer1);
 				// erode a whole bunch of times to reduce the object size
 				//erodeFilterWrapper(cblocks, cthreads, buffer1.data, frame.size().width, frame.size().height, 0, 0, binaryCircle5x5Offset, 5, 5, buffer2.data);
 				//erodeFilterWrapper(cblocks, cthreads, buffer2.data, frame.size().width, frame.size().height, 0, 0, binaryCircle5x5Offset, 5, 5, buffer1.data);
