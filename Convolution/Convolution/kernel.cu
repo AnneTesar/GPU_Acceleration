@@ -34,27 +34,10 @@ __constant__ unsigned char structuringElementStore[256];
 
 ////// PROTOTYPES
 unsigned char *createImageBuffer(unsigned int bytes, unsigned char **devicePtr);
+void manualCopy(unsigned char *src, int srcW, int srcH, int startX, int startY, unsigned char *dest, int destW, int destH);
 cv::Point centerOfMass(unsigned char *src, int width, int height, float outlierDist, int maxPoints);
+void findHSVColor(cv::Mat &src, unsigned char *mask, int width, int height, cv::Point objCenter, int objW, int objH, cv::Vec3b &lower_hsv, cv::Vec3b &upper_hsv);
 void handleKeypress(int keypress, cv::Mat frame);
-void manualCopy(unsigned char *src, int srcW, int srcH, int startX, int startY, unsigned char *dest, int destW, int destH)
-{
-	for (int destY = 0; destY < destH; destY++)
-	{
-		for (int destX = 0; destX < destW; destX++)
-		{
-			int srcX = startX + destX;
-			int srcY = startY + destY;
-			if (srcX < srcW && srcY < srcH)
-			{
-				dest[(destY*destW) + destX] = src[(srcY*srcW) + srcX];
-			}
-			else
-			{
-				dest[(destY*destW) + destX] = 0;
-			}
-		}
-	}
-}
 
 ////// GPU PROTOTYPES
 void invertBIWrapper(dim3 blocks, dim3 threads, unsigned char *src, int width, int height, unsigned char *dest);
@@ -62,9 +45,6 @@ __global__ void invertBI(unsigned char *src, int width, int height, unsigned cha
 
 void logicalAndWrapper(dim3 blocks, dim3 threads, unsigned char *src1, unsigned char *src2, unsigned char *dest, int width, int height);
 __global__ void logicalAnd(unsigned char *src1, unsigned char *src2, unsigned char *dest, int width, int height);
-
-void pythagorasWrapper(dim3 blocks, dim3 threads, unsigned char *a, unsigned char *b, unsigned char *c);
-__global__ void pythagoras(unsigned char *a, unsigned char *b, unsigned char *c);
 
 void convolveWrapper(dim3 blocks, dim3 threads, unsigned char *src, int width, int height, int paddingX, int paddingY, size_t kOffset, int kWidth, int kHeight, unsigned char *dest);
 __global__ void convolve(unsigned char *src, int width, int height, int paddingX, int paddingY, size_t kOffset, int kWidth, int kHeight, unsigned char *dest);
@@ -205,14 +185,21 @@ int main() {
 	structuringElementStoreEndOffset += sizeof(binaryCircle7x7) / sizeof(unsigned char);
 
 	////// VARIABLES
-	int greyscaleState = 1;
+	int frameState = 1;
 	int keypress, keypressCur;
 	
 	// object hsv thresholds
 	// blue ball
 	cv::Vec3b lower_hsv = { 88, 109, 0 };
 	cv::Vec3b upper_hsv = { 118, 255, 199 };
-
+	//lower_hsv - [98, 80, 35]
+	//upper_hsv - [107, 205, 153]
+	//lower_hsv - [99, 86, 30]
+	//upper_hsv - [107, 205, 147]
+	//lower_hsv - [98, 118, 49]
+	//upper_hsv - [106, 201, 137]
+	//lower_hsv - [96, 48, 43]
+	//upper_hsv - [105, 219, 137]
 	// blob detector parameters
 	cv::SimpleBlobDetector::Params params;
 	// params.filterByArea = true;
@@ -249,8 +236,8 @@ int main() {
 	cv::resize(frameOrig, frame, cv::Size(frameOrig.size().width * FRAME_RATIO, frameOrig.size().height * FRAME_RATIO));
 
 	// image buffers
-	unsigned char *greyscaleDataDevice2,
-		*greyscaleDataDevice1,
+	unsigned char *greyscaleDataDevice1,
+		*greyscaleDataDevice2,
 		*backgroundGreyscaleDataDevice,
 		*backgroundGreyscaleBlurredDataDevice,
 		*thresholdImageDataDevice,
@@ -266,9 +253,12 @@ int main() {
 	cv::Mat buffer2(frame.size(), CV_8U, createImageBuffer(frame.size().width * frame.size().height, &buffer2DataDevice));
 	cv::Mat display(frame.size(), CV_8U, createImageBuffer(frame.size().width * frame.size().height, &displayDataDevice));
 	cv::Mat background, backgroundOrig,
+		hsvBackground, hsvBackgroundOrig,
 		greyscale,
 		greyscalePrev,
-		hsvImage;
+		hsvImage,
+		hsvImagePrev,
+		hsvImageSub;
 	// object template setup
 	cv::Size objTemplateSize((OBJ_TEMPLATE_WIDTH * 2) + 1, (OBJ_TEMPLATE_HEIGHT * 2) + 1);
 	unsigned char *objTemplate1DataDevice, *objTemplate2DataDevice, *objTemplate3DataDevice, *objTemplate4DataDevice;
@@ -289,21 +279,21 @@ int main() {
 		activeCamera >> frameOrig;
 		cv::resize(frameOrig, frame, cv::Size(frameOrig.size().width * FRAME_RATIO, frameOrig.size().height * FRAME_RATIO));
 
-		// converty to greyscale
-		if (greyscaleState == 1) {
+		// convert color spaces
+		if (frameState == 1) {
 			cv::cvtColor(frame, greyscale1, CV_BGR2GRAY);
 			greyscalePrev = greyscale2;
 			greyscale = greyscale1;
-			greyscaleState = 2;
+			frameState = 2;
 		}
 		else {
 			cv::cvtColor(frame, greyscale2, CV_BGR2GRAY);
 			greyscalePrev = greyscale1;
 			greyscale = greyscale2;
-			greyscaleState = 1;
+			frameState = 1;
 		}
-
 		// convert to HSV
+		hsvImagePrev = hsvImage;
 		cv::cvtColor(frame, hsvImage, CV_BGR2HSV);
 
 		// state
@@ -322,11 +312,13 @@ int main() {
 			case Background:
 				if (backgroundSet) {
 					// blur
-					convolveWrapper(cblocks, cthreads, greyscale.data, frame.size().width, frame.size().height, 0, 0, gaussian5x5KernelOffset, 5, 5, buffer1.data);
+					//convolveWrapper(cblocks, cthreads, greyscale.data, frame.size().width, frame.size().height, 0, 0, gaussian5x5KernelOffset, 5, 5, buffer1.data);
 					// background subtraction
-					subtractImagesWrapper(cblocks, cthreads, buffer1.data, backgroundGreyscaleBlurred.data, frame.size().width, frame.size().height, threshold, buffer2.data);
+					//subtractImagesWrapper(cblocks, cthreads, buffer1.data, backgroundGreyscaleBlurred.data, frame.size().width, frame.size().height, threshold, buffer2.data);
+					cv::absdiff(hsvImage, hsvBackground, hsvImageSub);
+					cv::inRange(hsvImageSub, cv::Vec3b(threshold, threshold / 3, 20), cv::Vec3b(255, 255, 255), thresholdImage);
 					// open to remove noise
-					erodeFilterWrapper(cblocks, cthreads, buffer2.data, frame.size().width, frame.size().height, 0, 0, binaryCircle5x5Offset, 5, 5, buffer1.data);
+					erodeFilterWrapper(cblocks, cthreads, thresholdImage.data, frame.size().width, frame.size().height, 0, 0, binaryCircle5x5Offset, 5, 5, buffer1.data);
 					dilateFilterWrapper(cblocks, cthreads, buffer1.data, frame.size().width, frame.size().height, 0, 0, binaryCircle5x5Offset, 5, 5, buffer2.data);
 
 					display = buffer2;
@@ -360,33 +352,26 @@ int main() {
 						manualCopy(display.data, display.size().width, display.size().height, left, top, objTemplate1.data, objTemplate1.size().width, objTemplate1.size().height);
 						//cudaMemcpyToSymbol(structuringElementStore, objTemplate1.data, sizeof(objTemplate1.data), objTemplate1Offset * sizeof(unsigned char));
 						cv::imshow("Template Buffer1", objTemplate1);
-						// build the donut template
+						/*// build the donut template
 						// dilate to get bigger object
-						//dilateFilterWrapper(cblocks, cthreads, objTemplate1.data, objTemplate1.size().width, objTemplate1.size().height, 0, 0, binaryCircle5x5Offset, 5, 5, objTemplate2.data);
-						//cv::imshow("Template Buffer dilate", objTemplate2);
-						//dilateFilterWrapper(cblocks, cthreads, objTemplate2.data, objTemplate2.size().width, objTemplate2.size().height, 0, 0, binaryCircle5x5Offset, 5, 5, objTemplate3.data);
-						//cv::imshow("Template Buffer dilate2", objTemplate3);
+						dilateFilterWrapper(cblocks, cthreads, objTemplate1.data, objTemplate1.size().width, objTemplate1.size().height, 0, 0, binaryCircle5x5Offset, 5, 5, objTemplate2.data);
+						cv::imshow("Template Buffer dilate", objTemplate2);
+						dilateFilterWrapper(cblocks, cthreads, objTemplate2.data, objTemplate2.size().width, objTemplate2.size().height, 0, 0, binaryCircle5x5Offset, 5, 5, objTemplate3.data);
+						cv::imshow("Template Buffer dilate2", objTemplate3);
 						// invert the original object and AND with bigger to get donut
-						//invertBIWrapper(cblocks, cthreads, objTemplate1.data, objTemplate1.size().width, objTemplate1.size().height, objTemplate2.data);
-						//cv::imshow("Template Buffer1 inverted", objTemplate2);
-
-						/*for (int y = 0; y < 81; y++)
-						{
-							for (int x = 0; x < 81; x++)
-							{
-								objTemplate4.data[(y*81) + x] = ((objTemplate2.data[(y*81) + x] > 0) && (objTemplate3.data[(y*81) + x] > 0)) ? 255 : 0;
-							}
-						}*/
-						//cv::bitwise_and(objTemplate2, objTemplate3, objTemplate4);
-						//logicalAndWrapper(cblocks, cthreads, objTemplate2.data, objTemplate3.data, objTemplate4.data, objTemplate2.size().width, objTemplate2.size().height);
-						//cv::imshow("Template Buffer anded", objTemplate4);
+						invertBIWrapper(cblocks, cthreads, objTemplate1.data, objTemplate1.size().width, objTemplate1.size().height, objTemplate2.data);
+						cv::imshow("Template Buffer1 inverted", objTemplate2);
+						cv::bitwise_and(objTemplate2, objTemplate3, objTemplate4);
+						logicalAndWrapper(cblocks, cthreads, objTemplate2.data, objTemplate3.data, objTemplate4.data, objTemplate2.size().width, objTemplate2.size().height);
+						cv::imshow("Template Buffer anded", objTemplate4);
 						// copy the template into the structuring element store
-						//cudaMemcpyToSymbol(structuringElementStore, objTemplate4.data, sizeof(objTemplate4.data), objTemplate2Offset * sizeof(unsigned char));
+						//cudaMemcpyToSymbol(structuringElementStore, objTemplate4.data, sizeof(objTemplate4.data), objTemplate2Offset * sizeof(unsigned char));*/
 
 						// find the object's color
 						cv::Vec3b colorOfObj = hsvImage.at<cv::Vec3b>(centerPoint);
 						lower_hsv = cv::Vec3b(max(colorOfObj[0] - OBJ_H_RANGE, 0), max(colorOfObj[1] - OBJ_S_RANGE, 0), max(colorOfObj[2] - OBJ_V_RANGE, 0));
 						upper_hsv = cv::Vec3b(min(colorOfObj[0] + OBJ_H_RANGE, 255), min(colorOfObj[1] + OBJ_S_RANGE, 255), min(colorOfObj[2] + OBJ_V_RANGE, 255));
+						/*findHSVColor(hsvImage, display.data, frame.size().width, frame.size().height, centerPoint, OBJ_TEMPLATE_WIDTH, OBJ_TEMPLATE_HEIGHT, lower_hsv, upper_hsv);*/
 						std::cout << "lower_hsv - " << lower_hsv << std::endl;
 						std::cout << "upper_hsv - " << upper_hsv << std::endl;
 
@@ -402,6 +387,7 @@ int main() {
 					activeCamera >> backgroundOrig;
 					cv::resize(backgroundOrig, background, cv::Size(backgroundOrig.size().width * FRAME_RATIO, backgroundOrig.size().height * FRAME_RATIO));
 					cv::cvtColor(background, backgroundGreyscale, CV_BGR2GRAY);
+					cv::cvtColor(background, hsvBackground, CV_BGR2HSV);
 					convolveWrapper(cblocks, cthreads, backgroundGreyscale.data, frame.size().width, frame.size().height, 0, 0, gaussian5x5KernelOffset, 5, 5, backgroundGreyscaleBlurred.data);
 					backgroundSet = 1;
 				}
@@ -414,6 +400,7 @@ int main() {
 				erodeFilterWrapper(cblocks, cthreads, thresholdImage.data, frame.size().width, frame.size().height, 0, 0, binaryCircle5x5Offset, 5, 5, buffer1.data);
 				dilateFilterWrapper(cblocks, cthreads, buffer1.data, frame.size().width, frame.size().height, 0, 0, binaryCircle5x5Offset, 5, 5, buffer2.data);
 				dilateFilterWrapper(cblocks, cthreads, buffer2.data, frame.size().width, frame.size().height, 0, 0, binaryCircle5x5Offset, 5, 5, buffer1.data);
+				// erode a whole bunch of times to reduce the object size
 				erodeFilterWrapper(cblocks, cthreads, buffer1.data, frame.size().width, frame.size().height, 0, 0, binaryCircle5x5Offset, 5, 5, buffer2.data);
 				erodeFilterWrapper(cblocks, cthreads, buffer2.data, frame.size().width, frame.size().height, 0, 0, binaryCircle5x5Offset, 5, 5, buffer1.data);
 				erodeFilterWrapper(cblocks, cthreads, buffer1.data, frame.size().width, frame.size().height, 0, 0, binaryCircle5x5Offset, 5, 5, buffer2.data);
@@ -475,6 +462,188 @@ int main() {
 	return 0;
 }
 
+
+void manualCopy(unsigned char *src, int srcW, int srcH, int startX, int startY, unsigned char *dest, int destW, int destH)
+{
+	for (int destY = 0; destY < destH; destY++)
+	{
+		for (int destX = 0; destX < destW; destX++)
+		{
+			int srcX = startX + destX;
+			int srcY = startY + destY;
+			if (srcX < srcW && srcY < srcH)
+			{
+				dest[(destY*destW) + destX] = src[(srcY*srcW) + srcX];
+			}
+			else
+			{
+				dest[(destY*destW) + destX] = 0;
+			}
+		}
+	}
+}
+
+
+cv::Point centerOfMass(unsigned char *src, int width, int height, float outlierDist, int maxPoints)
+{
+	// variables
+	std::vector<cv::Point> points; // points that are on
+	float xi = 0.0, yi = 0.0, xf = 0.0, yf = 0.0; // initial and final center of mass coordinates
+	int pointsInRange; // points contained within the outlier region
+	// build point arrays
+	for (int y = 0, pIndex = 0; y < height && pIndex < maxPoints; y++)
+	{
+		for (int x = 0; x < width && pIndex < maxPoints; x++)
+		{
+			if (src[(y*width) + x] > 0)
+			{
+				cv::Point myPoint(x, y);
+				points.push_back(myPoint);
+			}
+		}
+	}
+
+	if (points.size() > 0)
+	{
+		// find initial center of mass
+		for (int i = 0; i < points.size(); i++)
+		{
+			cv::Point p = points[i];
+			xi += p.x;
+			yi += p.y;
+		}
+		xi /= points.size();
+		yi /= points.size();
+
+		// find new center of mass with outlier
+		pointsInRange = 0;
+		for (int i = 0; i < points.size(); i++)
+		{
+			cv::Point p = points[i];
+			if (abs(p.x - xi) < outlierDist && abs(p.y - yi) < outlierDist)
+			{
+				xf += p.x;
+				yf += p.y;
+				pointsInRange++;
+			}
+		}
+		xf /= pointsInRange;
+		yf /= pointsInRange;
+	}
+
+	cv::Point centerPoint(xf, yf);
+	return centerPoint;
+}
+
+
+void findHSVColor(cv::Mat &src, unsigned char *mask, int width, int height, cv::Point objCenter, int objW, int objH, cv::Vec3b &lower_hsv, cv::Vec3b &upper_hsv)
+{
+	// find average, min, max
+	float fraction = 0.9;
+	int numPoints = 0;
+	double avgH = 0, avgS = 0, avgV = 0;
+	int minH = 255, minS = 255, minV = 255;
+	int maxH = 0, maxS = 0, maxV = 0;
+	for (int y = objCenter.y; y < (objCenter.y + objH) && y < height; y++)
+	{
+		for (int x = objCenter.x; x < (objCenter.x + objW) && x < width; x++)
+		{
+			cv::Point p(x, y);
+			int pos = (y*width) + x;
+			if (mask[pos] > 0)
+			{
+				numPoints++;
+				cv::Vec3b c = src.at<cv::Vec3b>(p);
+				minH = min(minH, c[0]);
+				minS = min(minS, c[1]);
+				minV = min(minV, c[2]);
+				maxH = max(maxH, c[0]);
+				maxS = max(maxS, c[1]);
+				maxV = max(maxV, c[2]);
+				avgH += c[0];
+				avgS += c[1];
+				avgV += c[2];
+			}
+		}
+	}
+	avgH /= numPoints;
+	avgS /= numPoints;
+	avgV /= numPoints;
+	minH = avgH - (1.2 * (avgH - minH));
+	minS = avgS - (0.675 * (avgS - minS)) + 20;
+	minV = avgV - (1.25 * (avgV - minV));
+	maxH = avgH + (1.2 * (maxH - avgH));
+	maxS = avgS + (0.675 * (maxS - avgS)) + 20;
+	maxV = avgV + (1.25 * (maxV - avgV));
+
+	lower_hsv[0] = minH;
+	lower_hsv[1] = minS;
+	lower_hsv[2] = minV;
+	upper_hsv[0] = maxH;
+	upper_hsv[1] = maxS;
+	upper_hsv[2] = maxV;
+}
+
+
+void handleKeypress(int keypress, cv::Mat frame) {
+	switch (keypress) {
+	case 97: /* a */
+		activeOperation = Normal;
+		break;
+	case 115: /* s */
+		activeOperation = Greyscale;
+		break;
+	case 100: /* d */
+		activeOperation = Subtraction;
+		break;
+	case 102: /* f */
+		activeOperation = Background;
+		break;
+	case 103: /* g */
+		activeOperation = Tracking;
+		break;
+	case 104: /* h */
+		break;
+
+	case 112: /* p */
+		backgroundSet = 0;
+		break;
+
+
+	case 113: /* q */
+		activeCamera = camera_front;
+		break;
+	case 119: /* w */
+		activeCamera = camera_back;
+		break;
+	case 101: /* e */
+		activeCamera = camera_usb;
+		break;
+
+	case 116: /* t */
+		threshold += 5;
+		std::cout << "\nThreshold = " << threshold << "\n" << std::endl;
+		break;
+	case 121: /* y */
+		threshold -= 5;
+		std::cout << "\nThreshold = " << threshold << "\n" << std::endl;
+		break;
+
+	case 109: /* m */
+		oVideoWriter.open(std::to_string(videoName) + ".avi", CV_FOURCC('I', 'Y', 'U', 'V'), 20, frame.size(), true);
+		recording = 1;
+		videoName++;
+		break;
+	case 110: /* n */
+		recording = 0;
+		break;
+	default:
+		break;
+	}
+
+}
+
+
 unsigned char *createImageBuffer(unsigned int bytes, unsigned char **devicePtr) {
 
 	unsigned char *ptr = NULL;
@@ -535,35 +704,6 @@ __global__ void logicalAnd(unsigned char *src1, unsigned char *src2, unsigned ch
 	int i = (y * width) + x;
 
 	dest[i] = ((src1[i] > 0) && (src2[i] > 0)) ? 255 : 0;
-}
-
-
-void pythagorasWrapper(dim3 blocks, dim3 threads, unsigned char *a, unsigned char *b, unsigned char *c) {
-#if TIME_GPU
-	cudaEventRecord(start);
-#endif
-
-	pythagoras << <blocks, threads >> >(a, b, c);
-	cudaDeviceSynchronize();
-
-
-#if TIME_GPU
-	cudaEventRecord(stop);
-	float ms = 0.0f;
-	cudaEventSynchronize(stop);
-	cudaEventElapsedTime(&ms, start, stop);
-	std::cout << "Elapsed GPU time: " << ms << " milliseconds" << std::endl;
-#endif
-
-}
-__global__ void pythagoras(unsigned char *a, unsigned char *b, unsigned char *c)
-{
-	int idx = (blockIdx.x * blockDim.x) + threadIdx.x;
-
-	float af = float(a[idx]);
-	float bf = float(b[idx]);
-
-	c[idx] = (unsigned char)sqrtf(af*af + bf*bf);
 }
 
 
@@ -800,118 +940,6 @@ __global__ void dilateFilter(unsigned char *src, int width, int height, int padd
 			}
 		}
 	}
-}
-
-cv::Point centerOfMass(unsigned char *src, int width, int height, float outlierDist, int maxPoints)
-{
-	// variables
-	std::vector<cv::Point> points; // points that are on
-	float xi = 0.0, yi = 0.0, xf = 0.0, yf = 0.0; // initial and final center of mass coordinates
-	int pointsInRange; // points contained within the outlier region
-
-	// build point arrays
-	for(int y = 0, pIndex = 0; y < height && pIndex < maxPoints; y++)
-	{
-		for(int x = 0; x < width && pIndex < maxPoints; x++)
-		{
-			if(src[(y*width) + x] > 0)
-			{
-				cv::Point myPoint(x, y);
-				points.push_back( myPoint );
-			}
-		}
-	}
-
-	if( points.size() > 0)
-	{
-		// find initial center of mass
-		for(int i = 0; i < points.size(); i++)
-		{
-			cv::Point p = points[i];
-			xi += p.x;
-			yi += p.y;
-		}
-		xi /= points.size();
-		yi /= points.size();
-
-		// find new center of mass with outlier
-		pointsInRange = 0;
-		for(int i = 0; i < points.size(); i++)
-		{
-			cv::Point p = points[i];
-			if( abs( p.x - xi ) < outlierDist && abs( p.y - yi ) < outlierDist )
-			{
-				xf += p.x;
-				yf += p.y;
-				pointsInRange++;
-			}
-		}
-		xf /= pointsInRange;
-		yf /= pointsInRange;
-
-		
-	}
-
-	cv::Point centerPoint(xf, yf);
-	return centerPoint;
-}
-
-void handleKeypress(int keypress, cv::Mat frame) {
-	switch (keypress) {
-	case 97: /* a */
-		activeOperation = Normal;
-		break;
-	case 115: /* s */
-		activeOperation = Greyscale;
-		break;
-	case 100: /* d */
-		activeOperation = Subtraction;
-		break;
-	case 102: /* f */
-		activeOperation = Background;
-		break;
-	case 103: /* g */
-		activeOperation = Tracking;
-		break;
-	case 104: /* h */
-		break;
-
-	case 112: /* p */
-		backgroundSet = 0;
-		break;
-
-
-	case 113: /* q */
-		activeCamera = camera_front;
-		break;
-	case 119: /* w */
-		activeCamera = camera_back;
-		break;
-	case 101: /* e */
-		activeCamera = camera_usb;
-		break;
-
-	case 116: /* t */
-		threshold += 5;
-		std::cout << "\nThreshold = " << threshold << "\n" << std::endl;
-		break;
-	case 121: /* y */
-		threshold -= 5;
-		std::cout << "\nThreshold = " << threshold << "\n" << std::endl;
-		break;
-
-	case 109: /* m */
-		oVideoWriter.open(std::to_string(videoName) + ".avi", CV_FOURCC('I', 'Y', 'U', 'V'), 20, frame.size(), true);
-		recording = 1;
-		videoName++;
-		break;
-	case 110: /* n */
-		recording = 0;
-		break;
-	default:
-		break;
-	}
-
 }
 #endif
 
