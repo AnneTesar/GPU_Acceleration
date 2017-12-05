@@ -190,8 +190,16 @@ int main() {
 	
 	// object hsv thresholds
 	// blue ball
-	cv::Vec3b lower_hsv = { 88, 109, 0 };
-	cv::Vec3b upper_hsv = { 118, 255, 199 };
+//	cv::Vec3b lower_hsv = { 88, 109, 0 };
+//	cv::Vec3b upper_hsv = { 118, 255, 199 };
+	// red ball
+	cv::Vec3b lower_hsv = { 162, 44, 84 };
+	cv::Vec3b upper_hsv = { 192, 244, 255 };
+	// tennis ball
+	lower_hsv - [25, 123, 161]
+	upper_hsv - [29, 154, 212]
+
+	// old blue ball
 	//lower_hsv - [98, 80, 35]
 	//upper_hsv - [107, 205, 153]
 	//lower_hsv - [99, 86, 30]
@@ -273,6 +281,9 @@ int main() {
 	dim3 pblocks(frame.size().width * frame.size().height / 256);
 	dim3 pthreads(256, 1);
 
+	// object point
+	cv::Point objCenter, objCenterPrev;
+
 	// main loop
 	while (1) {
 		// grab the camera frame
@@ -316,7 +327,7 @@ int main() {
 					// background subtraction
 					//subtractImagesWrapper(cblocks, cthreads, buffer1.data, backgroundGreyscaleBlurred.data, frame.size().width, frame.size().height, threshold, buffer2.data);
 					cv::absdiff(hsvImage, hsvBackground, hsvImageSub);
-					cv::inRange(hsvImageSub, cv::Vec3b(threshold, threshold / 3, 20), cv::Vec3b(255, 255, 255), thresholdImage);
+					cv::inRange(hsvImageSub, cv::Vec3b(threshold, threshold / 3, 10), cv::Vec3b(255, 255, 255), thresholdImage);
 					// open to remove noise
 					erodeFilterWrapper(cblocks, cthreads, thresholdImage.data, frame.size().width, frame.size().height, 0, 0, binaryCircle5x5Offset, 5, 5, buffer1.data);
 					dilateFilterWrapper(cblocks, cthreads, buffer1.data, frame.size().width, frame.size().height, 0, 0, binaryCircle5x5Offset, 5, 5, buffer2.data);
@@ -368,10 +379,10 @@ int main() {
 						//cudaMemcpyToSymbol(structuringElementStore, objTemplate4.data, sizeof(objTemplate4.data), objTemplate2Offset * sizeof(unsigned char));*/
 
 						// find the object's color
-						cv::Vec3b colorOfObj = hsvImage.at<cv::Vec3b>(centerPoint);
-						lower_hsv = cv::Vec3b(max(colorOfObj[0] - OBJ_H_RANGE, 0), max(colorOfObj[1] - OBJ_S_RANGE, 0), max(colorOfObj[2] - OBJ_V_RANGE, 0));
-						upper_hsv = cv::Vec3b(min(colorOfObj[0] + OBJ_H_RANGE, 255), min(colorOfObj[1] + OBJ_S_RANGE, 255), min(colorOfObj[2] + OBJ_V_RANGE, 255));
-						/*findHSVColor(hsvImage, display.data, frame.size().width, frame.size().height, centerPoint, OBJ_TEMPLATE_WIDTH, OBJ_TEMPLATE_HEIGHT, lower_hsv, upper_hsv);*/
+						//cv::Vec3b colorOfObj = hsvImage.at<cv::Vec3b>(centerPoint);
+						//lower_hsv = cv::Vec3b(max(colorOfObj[0] - OBJ_H_RANGE, 0), max(colorOfObj[1] - OBJ_S_RANGE, 0), max(colorOfObj[2] - OBJ_V_RANGE, 0));
+						//upper_hsv = cv::Vec3b(min(colorOfObj[0] + OBJ_H_RANGE, 255), min(colorOfObj[1] + OBJ_S_RANGE, 255), min(colorOfObj[2] + OBJ_V_RANGE, 255));
+						findHSVColor(hsvImage, display.data, frame.size().width, frame.size().height, centerPoint, OBJ_TEMPLATE_WIDTH, OBJ_TEMPLATE_HEIGHT, lower_hsv, upper_hsv);
 						std::cout << "lower_hsv - " << lower_hsv << std::endl;
 						std::cout << "upper_hsv - " << upper_hsv << std::endl;
 
@@ -401,18 +412,23 @@ int main() {
 				dilateFilterWrapper(cblocks, cthreads, buffer1.data, frame.size().width, frame.size().height, 0, 0, binaryCircle5x5Offset, 5, 5, buffer2.data);
 				dilateFilterWrapper(cblocks, cthreads, buffer2.data, frame.size().width, frame.size().height, 0, 0, binaryCircle5x5Offset, 5, 5, buffer1.data);
 				// erode a whole bunch of times to reduce the object size
-				erodeFilterWrapper(cblocks, cthreads, buffer1.data, frame.size().width, frame.size().height, 0, 0, binaryCircle5x5Offset, 5, 5, buffer2.data);
-				erodeFilterWrapper(cblocks, cthreads, buffer2.data, frame.size().width, frame.size().height, 0, 0, binaryCircle5x5Offset, 5, 5, buffer1.data);
-				erodeFilterWrapper(cblocks, cthreads, buffer1.data, frame.size().width, frame.size().height, 0, 0, binaryCircle5x5Offset, 5, 5, buffer2.data);
-				erodeFilterWrapper(cblocks, cthreads, buffer2.data, frame.size().width, frame.size().height, 0, 0, binaryCircle5x5Offset, 5, 5, buffer1.data);
-				erodeFilterWrapper(cblocks, cthreads, buffer1.data, frame.size().width, frame.size().height, 0, 0, binaryCircle5x5Offset, 5, 5, buffer2.data);
-				erodeFilterWrapper(cblocks, cthreads, buffer2.data, frame.size().width, frame.size().height, 0, 0, binaryCircle5x5Offset, 5, 5, buffer1.data);
+				//erodeFilterWrapper(cblocks, cthreads, buffer1.data, frame.size().width, frame.size().height, 0, 0, binaryCircle5x5Offset, 5, 5, buffer2.data);
+				//erodeFilterWrapper(cblocks, cthreads, buffer2.data, frame.size().width, frame.size().height, 0, 0, binaryCircle5x5Offset, 5, 5, buffer1.data);
+				//erodeFilterWrapper(cblocks, cthreads, buffer1.data, frame.size().width, frame.size().height, 0, 0, binaryCircle5x5Offset, 5, 5, buffer2.data);
+				//erodeFilterWrapper(cblocks, cthreads, buffer2.data, frame.size().width, frame.size().height, 0, 0, binaryCircle5x5Offset, 5, 5, buffer1.data);
+				//erodeFilterWrapper(cblocks, cthreads, buffer1.data, frame.size().width, frame.size().height, 0, 0, binaryCircle5x5Offset, 5, 5, buffer2.data);
+				//erodeFilterWrapper(cblocks, cthreads, buffer2.data, frame.size().width, frame.size().height, 0, 0, binaryCircle5x5Offset, 5, 5, buffer1.data);
 				// erode by object template
 				//erodeTemplateFilterWrapper(cblocks, cthreads, buffer2.data, frame.size().width, frame.size().height, 100, 100, objTemplate1.data, objTemplate1.size().width, objTemplate1.size().height, buffer1.data);
 				display = buffer1;
 
 				// find the center of mass
-				cv::Point objCenter = centerOfMass(buffer1.data, frame.size().width, frame.size().height, OBJ_TEMPLATE_HEIGHT, (OBJ_TEMPLATE_WIDTH * OBJ_TEMPLATE_HEIGHT) / 2);
+				objCenterPrev = objCenter;
+				objCenter = centerOfMass(buffer1.data, frame.size().width, frame.size().height, OBJ_TEMPLATE_HEIGHT, (OBJ_TEMPLATE_WIDTH * OBJ_TEMPLATE_HEIGHT) / 2);
+				if (objCenter.x < 0)
+				{
+					objCenter = objCenterPrev;
+				}
 				//memset(buffer1.data, 0, buffer1.size().width*buffer1.size().height);
 				cv::circle(frame, objCenter, OBJ_TEMPLATE_WIDTH, cv::Scalar(150, 150, 50), 3);
 				display = frame;
@@ -529,9 +545,12 @@ cv::Point centerOfMass(unsigned char *src, int width, int height, float outlierD
 		}
 		xf /= pointsInRange;
 		yf /= pointsInRange;
+
+		cv::Point centerPoint(xf, yf);
+		return centerPoint;
 	}
 
-	cv::Point centerPoint(xf, yf);
+	cv::Point centerPoint(-1.0, -1.0);
 	return centerPoint;
 }
 
