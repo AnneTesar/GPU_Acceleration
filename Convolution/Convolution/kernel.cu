@@ -4,9 +4,6 @@
 Credit and thanks to https://github.com/Teknoman117/cuda/blob/master/imgproc_example/main.cu
 */
 
-// GPU benchmark control
-#define TIME_GPU 0
-
 #include <stdlib.h>
 #include <stddef.h>
 #include <stdio.h>
@@ -22,38 +19,49 @@ Credit and thanks to https://github.com/Teknoman117/cuda/blob/master/imgproc_exa
 #include "opencv2/imgproc.hpp"
 #include "opencv2/features2d.hpp"
 
-#if TIME_GPU
-cudaEvent_t start, stop;
-#endif
+////// CONSTANTS
+#define TIME_GPU 0
+#define FRAME_RATIO (1.0)
+#define OBJ_TEMPLATE_WIDTH (40 * FRAME_RATIO)
+#define OBJ_TEMPLATE_HEIGHT (40 * FRAME_RATIO)
+#define OBJ_H_RANGE (15)
+#define OBJ_S_RANGE (100)
+#define OBJ_V_RANGE (100)
 
-// convolution kernels
+////// GPU CONSTANTS
 __constant__ float convolutionKernelStore[256];
-// structuring elements
-__constant__ bool structuringElementStore[256];
+__constant__ unsigned char structuringElementStore[256];
 
+////// PROTOTYPES
 unsigned char *createImageBuffer(unsigned int bytes, unsigned char **devicePtr);
+void manualCopy(unsigned char *src, int srcW, int srcH, int startX, int startY, unsigned char *dest, int destW, int destH);
+cv::Point centerOfMass(unsigned char *src, int width, int height, float outlierDist, int maxPoints);
+void findHSVColor(cv::Mat &src, unsigned char *mask, int width, int height, cv::Point objCenter, int objW, int objH, cv::Vec3b &lower_hsv, cv::Vec3b &upper_hsv);
+void handleKeypress(int keypress, cv::Mat frame);
 
-void pythagorasWrapper(dim3 blocks, dim3 threads, unsigned char *a, unsigned char *b, unsigned char *c);
-__global__ void pythagoras(unsigned char *a, unsigned char *b, unsigned char *c);
+////// GPU PROTOTYPES
+void invertBIWrapper(dim3 blocks, dim3 threads, unsigned char *src, int width, int height, unsigned char *dest);
+__global__ void invertBI(unsigned char *src, int width, int height, unsigned char *dest);
 
-void convolveWrapper(dim3 blocks, dim3 threads, unsigned char *source, int width, int height, int paddingX, int paddingY, size_t kOffset, int kWidth, int kHeight, unsigned char *destination);
-__global__ void convolve(unsigned char *source, int width, int height, int paddingX, int paddingY, size_t kOffset, int kWidth, int kHeight, unsigned char *destination);
+void logicalAndWrapper(dim3 blocks, dim3 threads, unsigned char *src1, unsigned char *src2, unsigned char *dest, int width, int height);
+__global__ void logicalAnd(unsigned char *src1, unsigned char *src2, unsigned char *dest, int width, int height);
 
-void subtractImagesWrapper(dim3 blocks, dim3 threads, unsigned char *img1, unsigned char *img2, int width, int height, float threshold, unsigned char *destination);
-__global__ void subtractImages(unsigned char *img1, unsigned char *img2, int width, int height, float threshold, unsigned char *destination);
+void convolveWrapper(dim3 blocks, dim3 threads, unsigned char *src, int width, int height, int paddingX, int paddingY, size_t kOffset, int kWidth, int kHeight, unsigned char *dest);
+__global__ void convolve(unsigned char *src, int width, int height, int paddingX, int paddingY, size_t kOffset, int kWidth, int kHeight, unsigned char *dest);
 
-void erodeFilterWrapper(dim3 blocks, dim3 threads, unsigned char *source, int width, int height, int paddingX, int paddingY, size_t kOffset, int kWidth, int kHeight, unsigned char *destination);
-__global__ void erodeFilter(unsigned char *source, int width, int height, int paddingX, int paddingY, size_t kOffset, int kWidth, int kHeight, unsigned char *destination);
+void subtractImagesWrapper(dim3 blocks, dim3 threads, unsigned char *img1, unsigned char *img2, int width, int height, float threshold, unsigned char *dest);
+__global__ void subtractImages(unsigned char *img1, unsigned char *img2, int width, int height, float threshold, unsigned char *dest);
 
-void dilateFilterWrapper(dim3 blocks, dim3 threads, unsigned char *source, int width, int height, int paddingX, int paddingY, size_t kOffset, int kWidth, int kHeight, unsigned char *destination);
-__global__ void dilateFilter(unsigned char *source, int width, int height, int paddingX, int paddingY, size_t kOffset, int kWidth, int kHeight, unsigned char *destination);
+void erodeFilterWrapper(dim3 blocks, dim3 threads, unsigned char *src, int width, int height, int paddingX, int paddingY, size_t kOffset, int kWidth, int kHeight, unsigned char *dest);
+__global__ void erodeFilter(unsigned char *src, int width, int height, int paddingX, int paddingY, size_t kOffset, int kWidth, int kHeight, unsigned char *dest);
 
-void handleKeypress(cv::Mat frame);
-int keypress;
-int recording, videoName = 1;
+void erodeTemplateFilterWrapper(dim3 blocks, dim3 threads, unsigned char *src, int width, int height, int paddingX, int paddingY, unsigned char *objTemplate, int tWidth, int tHeight, unsigned char *dest);
+__global__ void erodeTemplateFilter(unsigned char *src, int width, int height, int paddingX, int paddingY, unsigned char *objTemplate, int tWidth, int tHeight, unsigned char *dest);
 
-cv::VideoWriter oVideoWriter;
+void dilateFilterWrapper(dim3 blocks, dim3 threads, unsigned char *src, int width, int height, int paddingX, int paddingY, size_t kOffset, int kWidth, int kHeight, unsigned char *dest);
+__global__ void dilateFilter(unsigned char *src, int width, int height, int paddingX, int paddingY, size_t kOffset, int kWidth, int kHeight, unsigned char *dest);
 
+////// ENUMS
 enum Operations {
 	Normal,
 	Greyscale,
@@ -61,6 +69,13 @@ enum Operations {
 	Background,
 	Tracking
 }activeOperation;
+
+////// GLOBAL VARIABLES
+float threshold = 20;
+int backgroundSet = 0;
+int recording = 0;
+int videoName = 1;
+cv::VideoWriter oVideoWriter;
 cv::VideoCapture camera_front(0);
 cv::VideoCapture camera_back(1);
 cv::VideoCapture camera_usb(2);
@@ -69,8 +84,18 @@ cv::VideoCapture activeCamera = camera_front;
 // default calibration threshold
 float threshold = 50;
 
+
+cv::Mat frame;
+cv::Mat background;
+int backgroundSet = 0;
+recording = 0;
+
+#if TIME_GPU
+cudaEvent_t start, stop;
+#endif
+
 int main() {
-	if (!camera_front.isOpened()) {
+  if (!camera_front.isOpened()) {
 		std::cout << "Camera 0 not opened" << std::endl;
 		activeCamera = camera_back;
 	}
@@ -80,20 +105,11 @@ int main() {
 	if (!camera_usb.isOpened()) {
 		std::cout << "Camera 2 not opened" << std::endl;
 	}
+  
+	////// CONVOLUTION KERNELS
+	size_t convolutionKernelStoreEndOffset = 0;
 
-	cv::Mat frame;
-	cv::Mat background;
-	int backgroundSet = 0;
-	recording = 0;
-
-#if TIME_GPU
-	cudaEventCreate(&start);
-	cudaEventCreate(&stop);
-#endif
-
-	/// CONVOLUTION KERNELS
-
-	const float gaussianKernel[25] =
+	const float gaussian5x5Kernel[25] =
 	{
 		2.f / 159.f,  4.f / 159.f,  5.f / 159.f,  4.f / 159.f, 2.f / 159.f,
 		4.f / 159.f,  9.f / 159.f, 12.f / 159.f,  9.f / 159.f, 4.f / 159.f,
@@ -101,10 +117,11 @@ int main() {
 		4.f / 159.f,  9.f / 159.f, 12.f / 159.f,  9.f / 159.f, 4.f / 159.f,
 		2.f / 159.f,  4.f / 159.f,  5.f / 159.f,  4.f / 159.f, 2.f / 159.f,
 	};
-	cudaMemcpyToSymbol(convolutionKernelStore, gaussianKernel, sizeof(gaussianKernel), 0);
-	const size_t gaussianKernelOffset = 0;
+	const size_t gaussian5x5KernelOffset = convolutionKernelStoreEndOffset;
+	cudaMemcpyToSymbol(convolutionKernelStore, gaussian5x5Kernel, sizeof(gaussian5x5Kernel), gaussian5x5KernelOffset * sizeof(float));
+	convolutionKernelStoreEndOffset += sizeof(gaussian5x5Kernel) / sizeof(float);
 
-	const float embossKernel[9] =
+	const float emboss3x3Kernel[9] =
 	{
 		1.f, 2.f, 1.f,
 		0.f, 0.f, 0.f,
@@ -116,47 +133,53 @@ int main() {
 		-1.f, 5.f, -1.f,
 		0.f, -1.f, 0.f,*/
 	};
-	cudaMemcpyToSymbol(convolutionKernelStore, embossKernel, sizeof(embossKernel), sizeof(gaussianKernel));
-	const size_t embossKernelOffset = sizeof(gaussianKernel) / sizeof(float);
+	const size_t emboss3x3KernelOffset = convolutionKernelStoreEndOffset;
+	cudaMemcpyToSymbol(convolutionKernelStore, emboss3x3Kernel, sizeof(emboss3x3Kernel), emboss3x3KernelOffset * sizeof(float));
+	convolutionKernelStoreEndOffset += sizeof(emboss3x3Kernel) / sizeof(float);
 
-	const float outlineKernel[9] =
+	const float outline3x3Kernel[9] =
 	{
 		-1.f, -1.f, -1.f,
 		-1.f, 8.f, -1.f,
 		-1.f, -1.f, -1.f,
 	};
-	cudaMemcpyToSymbol(convolutionKernelStore, outlineKernel, sizeof(outlineKernel), sizeof(gaussianKernel) + sizeof(embossKernel));
-	const size_t outlineKernelOffset = sizeof(embossKernel) / sizeof(float) + embossKernelOffset;
+	const size_t outline3x3KernelOffset = convolutionKernelStoreEndOffset;
+	cudaMemcpyToSymbol(convolutionKernelStore, outline3x3Kernel, sizeof(outline3x3Kernel), outline3x3KernelOffset * sizeof(float));
+	convolutionKernelStoreEndOffset += sizeof(outline3x3Kernel) / sizeof(float);
 
-	const float leftSobelKernel[9] =
+	const float leftSobel3x3Kernel[9] =
 	{
 		1.f, 0.f, -1.f,
 		2.f, 0.f, -2.f,
 		1.f, 0.f, -1.f,
 	};
-	cudaMemcpyToSymbol(convolutionKernelStore, leftSobelKernel, sizeof(leftSobelKernel), sizeof(gaussianKernel) + sizeof(embossKernel) + sizeof(outlineKernel));
-	const size_t leftSobelKernelOffset = sizeof(outlineKernel) / sizeof(float) + outlineKernelOffset;
-	const float topSobelKernel[9] =
+	const size_t leftSobel3x3KernelOffset = convolutionKernelStoreEndOffset;
+	cudaMemcpyToSymbol(convolutionKernelStore, leftSobel3x3Kernel, sizeof(leftSobel3x3Kernel), leftSobel3x3KernelOffset * sizeof(float));
+	convolutionKernelStoreEndOffset += sizeof(leftSobel3x3Kernel) / sizeof(float);
+
+	const float topSobel3x3Kernel[9] =
 	{
 		1.f, 2.f, 1.f,
 		0.f, 0.f, 0.f,
 		-1.f, -2.f, -1.f,
 	};
-	cudaMemcpyToSymbol(convolutionKernelStore, topSobelKernel, sizeof(topSobelKernel), sizeof(gaussianKernel) + sizeof(embossKernel) + sizeof(outlineKernel) + sizeof(leftSobelKernel));
-	const size_t topSobelKernelOffset = sizeof(leftSobelKernel) / sizeof(float) + leftSobelKernelOffset;
+	const size_t topSobel3x3KernelOffset = convolutionKernelStoreEndOffset;
+	cudaMemcpyToSymbol(convolutionKernelStore, topSobel3x3Kernel, sizeof(topSobel3x3Kernel), topSobel3x3KernelOffset * sizeof(float));
+	convolutionKernelStoreEndOffset += sizeof(topSobel3x3Kernel) / sizeof(float);
 
-	/// STRUCTURING ELEMENTS
-
-	const bool binaryCircle3x3[9] =
+	////// STRUCTURING ELEMENTS
+	size_t structuringElementStoreEndOffset = 0;
+	const unsigned char binaryCircle3x3[9] =
 	{
 		0, 1, 0,
 		1, 1, 1,
 		0, 1, 0
 	};
-	cudaMemcpyToSymbol(structuringElementStore, binaryCircle3x3, sizeof(binaryCircle3x3), 0);
-	const size_t binaryCircle3x3Offset = 0;
+	const size_t binaryCircle3x3Offset = structuringElementStoreEndOffset;
+	cudaMemcpyToSymbol(structuringElementStore, binaryCircle3x3, sizeof(binaryCircle3x3), binaryCircle3x3Offset * sizeof(unsigned char));
+	structuringElementStoreEndOffset += sizeof(binaryCircle3x3) / sizeof(unsigned char);
 
-	const bool binaryCircle5x5[25] =
+	const unsigned char binaryCircle5x5[25] =
 	{
 		0, 1, 1, 1, 0,
 		1, 1, 1, 1, 1,
@@ -164,10 +187,11 @@ int main() {
 		1, 1, 1, 1, 1,
 		0, 1, 1, 1, 0
 	};
-	cudaMemcpyToSymbol(structuringElementStore, binaryCircle5x5, sizeof(binaryCircle5x5), sizeof(binaryCircle3x3) / sizeof(binaryCircle3x3[0]));
-	const size_t binaryCircle5x5Offset = binaryCircle3x3Offset + (sizeof(binaryCircle3x3) / sizeof(binaryCircle3x3[0]));
+	const size_t binaryCircle5x5Offset = structuringElementStoreEndOffset;
+	cudaMemcpyToSymbol(structuringElementStore, binaryCircle5x5, sizeof(binaryCircle5x5), binaryCircle5x5Offset * sizeof(unsigned char));
+	structuringElementStoreEndOffset += sizeof(binaryCircle5x5) / sizeof(unsigned char);
 
-	const bool binaryCircle7x7[49] =
+	const unsigned char binaryCircle7x7[49] =
 	{
 		0, 0, 1, 1, 1, 0, 0,
 		0, 1, 1, 1, 1, 1, 0,
@@ -177,81 +201,134 @@ int main() {
 		0, 1, 1, 1, 1, 1, 0,
 		0, 0, 1, 1, 1, 0, 0,
 	};
-	cudaMemcpyToSymbol(structuringElementStore, binaryCircle7x7, sizeof(binaryCircle7x7), binaryCircle5x5Offset + (sizeof(binaryCircle5x5) / sizeof(binaryCircle5x5[0])));
-	const size_t binaryCircle7x7Offset = binaryCircle5x5Offset + (sizeof(binaryCircle5x5) / sizeof(binaryCircle5x5[0]));
+	const size_t binaryCircle7x7Offset = structuringElementStoreEndOffset;
+	cudaMemcpyToSymbol(structuringElementStore, binaryCircle7x7, sizeof(binaryCircle7x7), binaryCircle7x7Offset * sizeof(unsigned char));
+	structuringElementStoreEndOffset += sizeof(binaryCircle7x7) / sizeof(unsigned char);
 
-	activeCamera >> frame;
-	unsigned char *greyscaleDataDevice2,
-		*greyscaleDataDevice1,
+	////// VARIABLES
+	int frameState = 1;
+	int keypress, keypressCur;
+	
+	// object hsv thresholds
+	// blue ball
+	cv::Vec3b lower_hsv = { 88, 109, 0 };
+	cv::Vec3b upper_hsv = { 118, 255, 199 };
+	// red ball
+//	cv::Vec3b lower_hsv = { 162, 44, 84 };
+//	cv::Vec3b upper_hsv = { 192, 244, 255 };
+	// tennis ball
+//	lower_hsv - [25, 123, 161]
+//	upper_hsv - [29, 154, 212]
+
+	// old blue ball
+	//lower_hsv - [98, 80, 35]
+	//upper_hsv - [107, 205, 153]
+	//lower_hsv - [99, 86, 30]
+	//upper_hsv - [107, 205, 147]
+	//lower_hsv - [98, 118, 49]
+	//upper_hsv - [106, 201, 137]
+	//lower_hsv - [96, 48, 43]
+	//upper_hsv - [105, 219, 137]
+	// blob detector parameters
+	cv::SimpleBlobDetector::Params params;
+	// params.filterByArea = true;
+	// params.minArea = 1;
+	// params.maxArea = 300;
+	params.filterByColor = true;
+	params.blobColor = 255;
+	cv::Ptr<cv::SimpleBlobDetector> detector = cv::SimpleBlobDetector::create(params);
+	std::vector<cv::KeyPoint> keypoints;
+
+#if TIME_GPU
+	cudaEventCreate(&start);
+	cudaEventCreate(&stop);
+#endif
+
+	// camera frame
+	cv::Mat frame;
+	cv::Mat frameOrig;
+
+	// setup cameras
+	if (!camera_front.isOpened()) {
+		std::cout << "Front camera not opened" << std::endl;
+		activeCamera = camera_back;
+	}
+	if (!camera_back.isOpened()) {
+		std::cout << "Back camera not opened" << std::endl;
+	}
+	if (!camera_usb.isOpened()) {
+		std::cout << "USB camera not opened" << std::endl;
+	}
+
+	// grab the first frame
+	activeCamera >> frameOrig;
+	cv::resize(frameOrig, frame, cv::Size(frameOrig.size().width * FRAME_RATIO, frameOrig.size().height * FRAME_RATIO));
+
+	// image buffers
+	unsigned char *greyscaleDataDevice1,
+		*greyscaleDataDevice2,
 		*backgroundGreyscaleDataDevice,
 		*backgroundGreyscaleBlurredDataDevice,
-		*thresholdDataDevice,
-		*erosionDataDevice,
-		*dilationDataDevice,
-		*ballTemplateDataDevice,
-		*ballTemplateBufferDataDevice,
-		*bufferDataDevice,
+		*thresholdImageDataDevice,
+		*buffer1DataDevice,
+		*buffer2DataDevice,
 		*displayDataDevice;
 	cv::Mat greyscale1(frame.size(), CV_8U, createImageBuffer(frame.size().width * frame.size().height, &greyscaleDataDevice1));
 	cv::Mat greyscale2(frame.size(), CV_8U, createImageBuffer(frame.size().width * frame.size().height, &greyscaleDataDevice2));
 	cv::Mat backgroundGreyscale(frame.size(), CV_8U, createImageBuffer(frame.size().width * frame.size().height, &backgroundGreyscaleDataDevice));
 	cv::Mat backgroundGreyscaleBlurred(frame.size(), CV_8U, createImageBuffer(frame.size().width * frame.size().height, &backgroundGreyscaleBlurredDataDevice));
-	cv::Mat thresholdImage(frame.size(), CV_8U, createImageBuffer(frame.size().width * frame.size().height, &thresholdDataDevice));
-	cv::Mat erosion(frame.size(), CV_8U, createImageBuffer(frame.size().width * frame.size().height, &erosionDataDevice));
-	cv::Mat dilation(frame.size(), CV_8U, createImageBuffer(frame.size().width * frame.size().height, &dilationDataDevice));
-	cv::Mat buffer(frame.size(), CV_8U, createImageBuffer(frame.size().width * frame.size().height, &bufferDataDevice));
+	cv::Mat thresholdImage(frame.size(), CV_8U, createImageBuffer(frame.size().width * frame.size().height, &thresholdImageDataDevice));
+	cv::Mat buffer1(frame.size(), CV_8U, createImageBuffer(frame.size().width * frame.size().height, &buffer1DataDevice));
+	cv::Mat buffer2(frame.size(), CV_8U, createImageBuffer(frame.size().width * frame.size().height, &buffer2DataDevice));
 	cv::Mat display(frame.size(), CV_8U, createImageBuffer(frame.size().width * frame.size().height, &displayDataDevice));
+	cv::Mat background, backgroundOrig,
+		hsvBackground, hsvBackgroundOrig,
+		greyscale,
+		greyscalePrev,
+		hsvImage,
+		hsvImagePrev,
+		hsvImageSub;
+	// object template setup
+	cv::Size objTemplateSize((OBJ_TEMPLATE_WIDTH * 2) + 1, (OBJ_TEMPLATE_HEIGHT * 2) + 1);
+	unsigned char *objTemplate1DataDevice, *objTemplate2DataDevice, *objTemplate3DataDevice, *objTemplate4DataDevice;
+	cv::Mat objTemplate1(objTemplateSize, CV_8U, createImageBuffer(objTemplateSize.width * objTemplateSize.height, &objTemplate1DataDevice));
+	cv::Mat objTemplate2(objTemplateSize, CV_8U, createImageBuffer(objTemplateSize.width * objTemplateSize.height, &objTemplate2DataDevice));
+	cv::Mat objTemplate3(objTemplateSize, CV_8U, createImageBuffer(objTemplateSize.width * objTemplateSize.height, &objTemplate3DataDevice));
+	cv::Mat objTemplate4(objTemplateSize, CV_8U, createImageBuffer(objTemplateSize.width * objTemplateSize.height, &objTemplate4DataDevice));
 
-	int ballTemplateCropRadius = 50;
-	cv::Size ballTemplateSize((ballTemplateCropRadius * 2) + 1, (ballTemplateCropRadius * 2) + 1);
-	cv::Mat ballTemplate(ballTemplateSize, CV_8U, createImageBuffer(ballTemplateSize.width * ballTemplateSize.height, &ballTemplateDataDevice));
-	cv::Mat ballTemplateBuffer(ballTemplateSize, CV_8U, createImageBuffer(ballTemplateSize.width * ballTemplateSize.height, &ballTemplateBufferDataDevice));
+	// GPU settings
+	dim3 cblocks(frame.size().width / 16, frame.size().height / 16);
+	dim3 cthreads(16, 16);
+	dim3 pblocks(frame.size().width * frame.size().height / 256);
+	dim3 pthreads(256, 1);
 
+	// object point
+	cv::Point objCenter, objCenterPrev;
 
-	cv::Mat greyscale, greyscalePrev;
-	cv::Mat hsvimage;
-
-	// object HSV thresholds
-	std::vector<unsigned char> lower_hsv = { 170, 150, 91 };
-	std::vector<unsigned char> upper_hsv = { 185, 255, 255 };
-
-	int greyscaleState = 1;
-	int keypressCur;
-
-	cv::SimpleBlobDetector::Params params;
-	params.filterByArea = true;
-	params.minArea = 5.0;        
-	params.maxArea = 80.0;
-	//params.filterByCircularity = true;
-	//params.minCircularity = .8;
-	cv::Ptr<cv::SimpleBlobDetector> detector = cv::SimpleBlobDetector::create(params);
-	std::vector<cv::KeyPoint> keypoints;
-
-
+	// main loop
 	while (1) {
-		activeCamera >> frame;
-		if (greyscaleState == 1) {
+		// grab the camera frame
+		activeCamera >> frameOrig;
+		cv::resize(frameOrig, frame, cv::Size(frameOrig.size().width * FRAME_RATIO, frameOrig.size().height * FRAME_RATIO));
+
+		// convert color spaces
+		if (frameState == 1) {
 			cv::cvtColor(frame, greyscale1, CV_BGR2GRAY);
 			greyscalePrev = greyscale2;
 			greyscale = greyscale1;
-			greyscaleState = 2;
+			frameState = 2;
 		}
 		else {
 			cv::cvtColor(frame, greyscale2, CV_BGR2GRAY);
 			greyscalePrev = greyscale1;
 			greyscale = greyscale2;
-			greyscaleState = 1;
+			frameState = 1;
 		}
-
 		// convert to HSV
-		cv::cvtColor(frame, hsvimage, CV_BGR2HSV);
-		cv::inRange(hsvimage, lower_hsv, upper_hsv, thresholdImage);
+		hsvImagePrev = hsvImage;
+		cv::cvtColor(frame, hsvImage, CV_BGR2HSV);
 
-
-		dim3 cblocks(frame.size().width / 16, frame.size().height / 16);
-		dim3 cthreads(16, 16);
-		dim3 pblocks(frame.size().width * frame.size().height / 256);
-		dim3 pthreads(256, 1);
+		// state
 		{
 			switch (activeOperation) {
 			case Normal:
@@ -261,20 +338,25 @@ int main() {
 				display = greyscale;
 				break;
 			case Subtraction:
-				subtractImagesWrapper(cblocks, cthreads, greyscale.data, greyscalePrev.data, frame.size().width, frame.size().height, threshold, bufferDataDevice);
-				display = buffer;
+				subtractImagesWrapper(cblocks, cthreads, greyscale.data, greyscalePrev.data, frame.size().width, frame.size().height, threshold, buffer1.data);
+				display = buffer1;
 				break;
 			case Background:
 				if (backgroundSet) {
 					// blur
-					convolveWrapper(cblocks, cthreads, greyscale.data, frame.size().width, frame.size().height, 0, 0, gaussianKernelOffset, 5, 5, bufferDataDevice);
+					//convolveWrapper(cblocks, cthreads, greyscale.data, frame.size().width, frame.size().height, 0, 0, gaussian5x5KernelOffset, 5, 5, buffer1.data);
 					// background subtraction
-					subtractImagesWrapper(cblocks, cthreads, bufferDataDevice, backgroundGreyscaleBlurred.data, frame.size().width, frame.size().height, threshold, thresholdDataDevice);
-					// small erode to remove noise
-					erodeFilterWrapper(cblocks, cthreads, thresholdDataDevice, frame.size().width, frame.size().height, 0, 0, binaryCircle5x5Offset, 5, 5, erosionDataDevice);
-					
+					//subtractImagesWrapper(cblocks, cthreads, buffer1.data, backgroundGreyscaleBlurred.data, frame.size().width, frame.size().height, threshold, buffer2.data);
+					cv::absdiff(hsvImage, hsvBackground, hsvImageSub);
+					cv::inRange(hsvImageSub, cv::Vec3b(threshold, threshold / 3, 10), cv::Vec3b(255, 255, 255), thresholdImage);
+					// open to remove noise
+					erodeFilterWrapper(cblocks, cthreads, thresholdImage.data, frame.size().width, frame.size().height, 0, 0, binaryCircle5x5Offset, 5, 5, buffer1.data);
+					dilateFilterWrapper(cblocks, cthreads, buffer1.data, frame.size().width, frame.size().height, 0, 0, binaryCircle5x5Offset, 5, 5, buffer2.data);
+
+					display = buffer2;
+
 					// blob detector
-					detector->detect(thresholdImage, keypoints);
+					detector->detect(display, keypoints);
 					// ignore if multiple blobs found
 					if (keypoints.size() > 1) {
 						std::cout << "more than one keypoint found" << std::endl;
@@ -283,54 +365,106 @@ int main() {
 						std::cout << "just one keypoint found - " << keypoints[0].pt << std::endl;
 						// grab the center
 						cv::Point centerPoint = keypoints[0].pt;
+
 						// pick bounds for blob template
-						int left = floor(centerPoint.x) - ballTemplateCropRadius;
+						int left = floor(centerPoint.x) - OBJ_TEMPLATE_WIDTH;
 						if (left < 0) left = 0;
-						int right = floor(centerPoint.x) + ballTemplateCropRadius;
+						int right = floor(centerPoint.x) + OBJ_TEMPLATE_WIDTH;
 						if (right > frame.size().width - 1) right = frame.size().width - 1;
-						int top = floor(centerPoint.y) - ballTemplateCropRadius;
+						int top = floor(centerPoint.y) - OBJ_TEMPLATE_HEIGHT;
 						if (top < 0) top = 0;
-						int bottom = floor(centerPoint.y) + ballTemplateCropRadius;
+						int bottom = floor(centerPoint.y) + OBJ_TEMPLATE_HEIGHT;
 						if (bottom > frame.size().height - 1) bottom = frame.size().height - 1;
 						// build the template
-						cv::Mat part(
-							thresholdImage,
+						/*cv::Mat part(
+							display,
 							cv::Range(top, bottom),
 							cv::Range(left, right));
-						ballTemplateBuffer = part;
 
-						cv::imshow("Template Buffer", ballTemplateBuffer);
+            objTemplate1 = part;*/
+						manualCopy(display.data, display.size().width, display.size().height, left, top, objTemplate1.data, objTemplate1.size().width, objTemplate1.size().height);
+						//cudaMemcpyToSymbol(structuringElementStore, objTemplate1.data, sizeof(objTemplate1.data), objTemplate1Offset * sizeof(unsigned char));
+						cv::imshow("Template Buffer1", objTemplate1);
+						/*// build the donut template
+						// dilate to get bigger object
+						dilateFilterWrapper(cblocks, cthreads, objTemplate1.data, objTemplate1.size().width, objTemplate1.size().height, 0, 0, binaryCircle5x5Offset, 5, 5, objTemplate2.data);
+						cv::imshow("Template Buffer dilate", objTemplate2);
+						dilateFilterWrapper(cblocks, cthreads, objTemplate2.data, objTemplate2.size().width, objTemplate2.size().height, 0, 0, binaryCircle5x5Offset, 5, 5, objTemplate3.data);
+						cv::imshow("Template Buffer dilate2", objTemplate3);
+						// invert the original object and AND with bigger to get donut
+						invertBIWrapper(cblocks, cthreads, objTemplate1.data, objTemplate1.size().width, objTemplate1.size().height, objTemplate2.data);
+						cv::imshow("Template Buffer1 inverted", objTemplate2);
+						cv::bitwise_and(objTemplate2, objTemplate3, objTemplate4);
+						logicalAndWrapper(cblocks, cthreads, objTemplate2.data, objTemplate3.data, objTemplate4.data, objTemplate2.size().width, objTemplate2.size().height);
+						cv::imshow("Template Buffer anded", objTemplate4);
+						// copy the template into the structuring element store
+						//cudaMemcpyToSymbol(structuringElementStore, objTemplate4.data, sizeof(objTemplate4.data), objTemplate2Offset * sizeof(unsigned char));*/
 
+						// find the object's color
+						//cv::Vec3b colorOfObj = hsvImage.at<cv::Vec3b>(centerPoint);
+						//lower_hsv = cv::Vec3b(max(colorOfObj[0] - OBJ_H_RANGE, 0), max(colorOfObj[1] - OBJ_S_RANGE, 0), max(colorOfObj[2] - OBJ_V_RANGE, 0));
+						//upper_hsv = cv::Vec3b(min(colorOfObj[0] + OBJ_H_RANGE, 255), min(colorOfObj[1] + OBJ_S_RANGE, 255), min(colorOfObj[2] + OBJ_V_RANGE, 255));
+						findHSVColor(hsvImage, display.data, frame.size().width, frame.size().height, centerPoint, OBJ_TEMPLATE_WIDTH, OBJ_TEMPLATE_HEIGHT, lower_hsv, upper_hsv);
+						std::cout << "lower_hsv - " << lower_hsv << std::endl;
+						std::cout << "upper_hsv - " << upper_hsv << std::endl;
 
-						cv::circle(buffer, keypoints[0].pt, 40, cv::Scalar(255, 0, 0), 2);
+						cv::circle(display, keypoints[0].pt, 40, cv::Scalar(255, 0, 0), 2);
 					}
 					else {
 						std::cout << "nothing found - " << std::endl;
 					}
-
-					display = thresholdImage;
 				}
 				else {
 					std::cout << "Take Background Picture by pressing 'p' " << std::endl;
 					while (1) if (cv::waitKey(1) == 112) break;
-					activeCamera >> background;
+					activeCamera >> backgroundOrig;
+					cv::resize(backgroundOrig, background, cv::Size(backgroundOrig.size().width * FRAME_RATIO, backgroundOrig.size().height * FRAME_RATIO));
 					cv::cvtColor(background, backgroundGreyscale, CV_BGR2GRAY);
-					convolveWrapper(cblocks, cthreads, backgroundGreyscale.data, frame.size().width, frame.size().height, 0, 0, gaussianKernelOffset, 5, 5, backgroundGreyscaleBlurredDataDevice);
+					cv::cvtColor(background, hsvBackground, CV_BGR2HSV);
+					convolveWrapper(cblocks, cthreads, backgroundGreyscale.data, frame.size().width, frame.size().height, 0, 0, gaussian5x5KernelOffset, 5, 5, backgroundGreyscaleBlurred.data);
 					backgroundSet = 1;
 				}
 				break;
 			case Tracking:
-//				display = thresholdImage;
-				erodeFilterWrapper(cblocks, cthreads, thresholdDataDevice, frame.size().width, frame.size().height, 0, 0, binaryCircle5x5Offset, 5, 5, erosionDataDevice);
-				dilateFilterWrapper(cblocks, cthreads, erosionDataDevice, frame.size().width, frame.size().height, 0, 0, binaryCircle5x5Offset, 5, 5, thresholdDataDevice);
-				dilateFilterWrapper(cblocks, cthreads, thresholdDataDevice, frame.size().width, frame.size().height, 0, 0, binaryCircle5x5Offset, 5, 5, erosionDataDevice);
-				display = erosion;
+			{
+				// threshold on object color
+				cv::inRange(hsvImage, lower_hsv, upper_hsv, thresholdImage);
+				cv::imshow("threshold", thresholdImage);
+				// open the image to reduce noise
+				erodeFilterWrapper(cblocks, cthreads, thresholdImage.data, frame.size().width, frame.size().height, 0, 0, binaryCircle5x5Offset, 5, 5, buffer1.data);
+				dilateFilterWrapper(cblocks, cthreads, buffer1.data, frame.size().width, frame.size().height, 0, 0, binaryCircle5x5Offset, 5, 5, buffer2.data);
+				dilateFilterWrapper(cblocks, cthreads, buffer2.data, frame.size().width, frame.size().height, 0, 0, binaryCircle5x5Offset, 5, 5, buffer1.data);
+				cv::imshow("dilate, erode", buffer1);
+				// erode a whole bunch of times to reduce the object size
+				//erodeFilterWrapper(cblocks, cthreads, buffer1.data, frame.size().width, frame.size().height, 0, 0, binaryCircle5x5Offset, 5, 5, buffer2.data);
+				//erodeFilterWrapper(cblocks, cthreads, buffer2.data, frame.size().width, frame.size().height, 0, 0, binaryCircle5x5Offset, 5, 5, buffer1.data);
+				//erodeFilterWrapper(cblocks, cthreads, buffer1.data, frame.size().width, frame.size().height, 0, 0, binaryCircle5x5Offset, 5, 5, buffer2.data);
+				//erodeFilterWrapper(cblocks, cthreads, buffer2.data, frame.size().width, frame.size().height, 0, 0, binaryCircle5x5Offset, 5, 5, buffer1.data);
+				//erodeFilterWrapper(cblocks, cthreads, buffer1.data, frame.size().width, frame.size().height, 0, 0, binaryCircle5x5Offset, 5, 5, buffer2.data);
+				//erodeFilterWrapper(cblocks, cthreads, buffer2.data, frame.size().width, frame.size().height, 0, 0, binaryCircle5x5Offset, 5, 5, buffer1.data);
+				// erode by object template
+				//erodeTemplateFilterWrapper(cblocks, cthreads, buffer2.data, frame.size().width, frame.size().height, 100, 100, objTemplate1.data, objTemplate1.size().width, objTemplate1.size().height, buffer1.data);
+				display = buffer1;
+
+				// find the center of mass
+				objCenterPrev = objCenter;
+				objCenter = centerOfMass(buffer1.data, frame.size().width, frame.size().height, OBJ_TEMPLATE_HEIGHT, (OBJ_TEMPLATE_WIDTH * OBJ_TEMPLATE_HEIGHT) / 2);
+				if (objCenter.x < 0)
+				{
+					objCenter = objCenterPrev;
+				}
+				//memset(buffer1.data, 0, buffer1.size().width*buffer1.size().height);
+				cv::circle(frame, objCenter, OBJ_TEMPLATE_WIDTH, cv::Scalar(150, 150, 50), 3);
+				display = frame;
+
 				break;
+			}
 			default:
 				break;
 			}
 		}
 
+		// record to video
 		if (recording)
 			oVideoWriter.write(display);
 
@@ -340,250 +474,161 @@ int main() {
 			cv::imshow("Convolution", display);
 		}
 
+		// handle keypresses
 		keypressCur = cv::waitKey(1);
 		if (keypressCur < 255) {
 			keypress = keypressCur;
-			handleKeypress(frame);
+			handleKeypress(keypress, frame);
 		}
-
 		if (keypress == 27) break;
 	}
+
+	// free GPU space
 	cudaFreeHost(greyscale1.data);
 	cudaFreeHost(greyscale2.data);
 	cudaFreeHost(backgroundGreyscale.data);
 	cudaFreeHost(backgroundGreyscaleBlurred.data);
 	cudaFreeHost(thresholdImage.data);
-	cudaFreeHost(erosion.data);
-	cudaFreeHost(dilation.data);
-	cudaFreeHost(ballTemplate.data);
-	cudaFreeHost(ballTemplateBuffer.data);
-	cudaFreeHost(buffer.data);
+	cudaFreeHost(objTemplate1.data);
+	cudaFreeHost(objTemplate2.data);
+	cudaFreeHost(objTemplate3.data);
+	cudaFreeHost(objTemplate4.data);
+	cudaFreeHost(buffer1.data);
+	cudaFreeHost(buffer2.data);
 	cudaFreeHost(display.data);
-
+	// free others
 	oVideoWriter.release();
 
 	return 0;
 }
 
-unsigned char *createImageBuffer(unsigned int bytes, unsigned char **devicePtr) {
 
-	unsigned char *ptr = NULL;
-	cudaSetDeviceFlags(cudaDeviceMapHost);
-	cudaHostAlloc(&ptr, bytes, cudaHostAllocMapped);
-	cudaHostGetDevicePointer(devicePtr, ptr, 0);
-	return ptr;
-}
-
-void pythagorasWrapper(dim3 blocks, dim3 threads, unsigned char *a, unsigned char *b, unsigned char *c) {
-#if TIME_GPU
-	cudaEventRecord(start);
-#endif
-
-	pythagoras << <blocks, threads >> >(a, b, c);
-	cudaDeviceSynchronize();
-
-#if TIME_GPU
-	cudaEventRecord(stop);
-	float ms = 0.0f;
-	cudaEventSynchronize(stop);
-	cudaEventElapsedTime(&ms, start, stop);
-	std::cout << "Elapsed GPU time: " << ms << " milliseconds" << std::endl;
-#endif
-
-}
-__global__ void pythagoras(unsigned char *a, unsigned char *b, unsigned char *c)
+void manualCopy(unsigned char *src, int srcW, int srcH, int startX, int startY, unsigned char *dest, int destW, int destH)
 {
-	int idx = (blockIdx.x * blockDim.x) + threadIdx.x;
-
-	float af = float(a[idx]);
-	float bf = float(b[idx]);
-
-	c[idx] = (unsigned char)sqrtf(af*af + bf*bf);
-}
-
-
-void convolveWrapper(dim3 blocks, dim3 threads, unsigned char *source, int width, int height, int paddingX, int paddingY, size_t kOffset, int kWidth, int kHeight, unsigned char *destination) {
-#if TIME_GPU
-	cudaEventRecord(start);
-#endif
-
-	convolve << <blocks, threads >> > (source, width, height, paddingX, paddingY, kOffset, kWidth, kHeight, destination);
-	cudaDeviceSynchronize();
-
-#if TIME_GPU
-	cudaEventRecord(stop);
-	float ms = 0.0f;
-	cudaEventSynchronize(stop);
-	cudaEventElapsedTime(&ms, start, stop);
-	std::cout << "Elapsed GPU time: " << ms << " milliseconds" << std::endl;
-#endif
-}
-__global__ void convolve(unsigned char *source, int width, int height, int paddingX, int paddingY, size_t kOffset, int kWidth, int kHeight, unsigned char *destination) {
-
-	int x = (blockIdx.x * blockDim.x) + threadIdx.x;
-	int y = (blockIdx.y * blockDim.y) + threadIdx.y;
-
-	float sum = 0.0;
-	int pWidth = kWidth / 2;
-	int pHeight = kHeight / 2;
-
-	// Only execute for valid pixels
-	if (x >= pWidth + paddingX &&
-		y >= pHeight + paddingY &&
-		x < (blockDim.x * gridDim.x) - pWidth - paddingX &&
-		y < (blockDim.y * gridDim.y) - pHeight - paddingY)
+	for (int destY = 0; destY < destH; destY++)
 	{
-		for (int j = -pHeight; j <= pHeight; j++)
+		for (int destX = 0; destX < destW; destX++)
 		{
-			for (int i = -pWidth; i <= pWidth; i++)
+			int srcX = startX + destX;
+			int srcY = startY + destY;
+			if (srcX < srcW && srcY < srcH)
 			{
-				// Sample the weight for this location
-				int ki = (i + pWidth);
-				int kj = (j + pHeight);
-				float w = convolutionKernelStore[(kj * kWidth) + ki + kOffset];
-
-
-				sum += w * float(source[((y + j) * width) + (x + i)]);
+				dest[(destY*destW) + destX] = src[(srcY*srcW) + srcX];
 			}
-		}
-	}
-
-	destination[(y * width) + x] = (unsigned char)sum;
-}
-
-
-void subtractImagesWrapper(dim3 blocks, dim3 threads, unsigned char *img1, unsigned char *img2, int width, int height, float threshold, unsigned char *destination) {
-#if TIME_GPU
-	cudaEventRecord(start);
-#endif
-
-	subtractImages << <blocks, threads >> > (img1, img2, width, height, threshold, destination);
-	cudaDeviceSynchronize();
-
-#if TIME_GPU
-	cudaEventRecord(stop);
-	float ms = 0.0f;
-	cudaEventSynchronize(stop);
-	cudaEventElapsedTime(&ms, start, stop);
-	std::cout << "Elapsed GPU time: " << ms << " milliseconds" << std::endl;
-#endif
-}
-__global__ void subtractImages(unsigned char *img1, unsigned char *img2, int width, int height, float threshold, unsigned char *destination) {
-
-	int x = (blockIdx.x * blockDim.x) + threadIdx.x;
-	int y = (blockIdx.y * blockDim.y) + threadIdx.y;
-
-	float pixelDifference = abs(img1[(y * width) + x] - img2[(y * width) + x]);
-	if (pixelDifference > threshold) {
-		destination[(y * width) + x] = 255.0f;
-	}
-	else {
-		destination[(y * width) + x] = 0.0f;
-	}
-}
-
-
-void erodeFilterWrapper(dim3 blocks, dim3 threads, unsigned char *source, int width, int height, int paddingX, int paddingY, size_t kOffset, int kWidth, int kHeight, unsigned char *destination) {
-#if TIME_GPU
-	cudaEventRecord(start);
-#endif
-
-	erodeFilter << <blocks, threads >> > (source, width, height, paddingX, paddingY, kOffset, kWidth, kHeight, destination);
-	cudaDeviceSynchronize();
-
-#if TIME_GPU
-	cudaEventRecord(stop);
-	float ms = 0.0f;
-	cudaEventSynchronize(stop);
-	cudaEventElapsedTime(&ms, start, stop);
-	std::cout << "Elapsed GPU time: " << ms << " milliseconds" << std::endl;
-#endif
-}
-__global__ void erodeFilter(unsigned char *source, int width, int height, int paddingX, int paddingY, size_t kOffset, int kWidth, int kHeight, unsigned char *destination)
-{
-	int x = (blockIdx.x * blockDim.x) + threadIdx.x;
-	int y = (blockIdx.y * blockDim.y) + threadIdx.y;
-
-	bool erode = false;
-	int pWidth = kWidth / 2;
-	int pHeight = kHeight / 2;
-
-	// Only execute for valid pixels
-	if (x >= pWidth + paddingX &&
-		y >= pHeight + paddingY &&
-		x < (blockDim.x * gridDim.x) - pWidth - paddingX &&
-		y < (blockDim.y * gridDim.y) - pHeight - paddingY)
-	{
-		for (int j = -pHeight; j <= pHeight && !erode; j++)
-		{
-			for (int i = -pWidth; i <= pWidth && !erode; i++)
+			else
 			{
-				// Sample the weight for this location
-				int ki = (i + pWidth);
-				int kj = (j + pHeight);
-				bool w = (structuringElementStore[(kj * kWidth) + ki + kOffset] > 0);
-				if (w)
-				{
-					erode = !(source[((y + j) * width) + (x + i)] > 0);
-				}
-			}
-		}
-	}
-
-	destination[(y * width) + x] = (erode) ? 0 : 255;
-}
-
-void dilateFilterWrapper(dim3 blocks, dim3 threads, unsigned char *source, int width, int height, int paddingX, int paddingY, size_t kOffset, int kWidth, int kHeight, unsigned char *destination) {
-#if TIME_GPU
-	cudaEventRecord(start);
-#endif
-
-	dilateFilter << <blocks, threads >> > (source, width, height, paddingX, paddingY, kOffset, kWidth, kHeight, destination);
-	cudaDeviceSynchronize();
-
-#if TIME_GPU
-	cudaEventRecord(stop);
-	float ms = 0.0f;
-	cudaEventSynchronize(stop);
-	cudaEventElapsedTime(&ms, start, stop);
-	std::cout << "Elapsed GPU time: " << ms << " milliseconds" << std::endl;
-#endif
-}
-__global__ void dilateFilter(unsigned char *source, int width, int height, int paddingX, int paddingY, size_t kOffset, int kWidth, int kHeight, unsigned char *destination)
-{
-	int x = (blockIdx.x * blockDim.x) + threadIdx.x;
-	int y = (blockIdx.y * blockDim.y) + threadIdx.y;
-
-	int pWidth = kWidth / 2;
-	int pHeight = kHeight / 2;
-
-	// Only execute for valid pixels
-	if (x >= pWidth + paddingX &&
-		y >= pHeight + paddingY &&
-		x < (blockDim.x * gridDim.x) - pWidth - paddingX &&
-		y < (blockDim.y * gridDim.y) - pHeight - paddingY)
-	{
-		// is this pixel on?
-		if (source[(y * width) + x] > 0)
-		{
-			// Dilate!!!
-			for (int j = -pHeight; j <= pHeight; j++)
-			{
-				for (int i = -pWidth; i <= pWidth; i++)
-				{
-					int ki = (i + pWidth);
-					int kj = (j + pHeight);
-					if (structuringElementStore[(kj * kWidth) + ki + kOffset] > 0)
-					{
-						destination[((y + j) * width) + (x + i)] = 255;
-					}
-				}
+				dest[(destY*destW) + destX] = 0;
 			}
 		}
 	}
 }
 
-void handleKeypress(cv::Mat frame) {
+
+cv::Point centerOfMass(unsigned char *src, int width, int height, float outlierDist, int maxPoints)
+{
+	// variables
+	std::vector<cv::Point> points; // points that are on
+	float xi = 0.0, yi = 0.0, xf = 0.0, yf = 0.0; // initial and final center of mass coordinates
+	int pointsInRange; // points contained within the outlier region
+	// build point arrays
+	for (int y = 0, pIndex = 0; y < height && pIndex < maxPoints; y++)
+	{
+		for (int x = 0; x < width && pIndex < maxPoints; x++)
+		{
+			if (src[(y*width) + x] > 0)
+			{
+				cv::Point myPoint(x, y);
+				points.push_back(myPoint);
+			}
+		}
+	}
+
+	if (points.size() > 0)
+	{
+		// find initial center of mass
+		for (int i = 0; i < points.size(); i++)
+		{
+			cv::Point p = points[i];
+			xi += p.x;
+			yi += p.y;
+		}
+		xi /= points.size();
+		yi /= points.size();
+
+		// find new center of mass with outlier
+		pointsInRange = 0;
+		for (int i = 0; i < points.size(); i++)
+		{
+			cv::Point p = points[i];
+			if (abs(p.x - xi) < outlierDist && abs(p.y - yi) < outlierDist)
+			{
+				xf += p.x;
+				yf += p.y;
+				pointsInRange++;
+			}
+		}
+		xf /= pointsInRange;
+		yf /= pointsInRange;
+
+		cv::Point centerPoint(xf, yf);
+		return centerPoint;
+	}
+
+	cv::Point centerPoint(-1.0, -1.0);
+	return centerPoint;
+}
+
+
+void findHSVColor(cv::Mat &src, unsigned char *mask, int width, int height, cv::Point objCenter, int objW, int objH, cv::Vec3b &lower_hsv, cv::Vec3b &upper_hsv)
+{
+	// find average, min, max
+	float fraction = 0.9;
+	int numPoints = 0;
+	double avgH = 0, avgS = 0, avgV = 0;
+	int minH = 255, minS = 255, minV = 255;
+	int maxH = 0, maxS = 0, maxV = 0;
+	for (int y = objCenter.y; y < (objCenter.y + objH) && y < height; y++)
+	{
+		for (int x = objCenter.x; x < (objCenter.x + objW) && x < width; x++)
+		{
+			cv::Point p(x, y);
+			int pos = (y*width) + x;
+			if (mask[pos] > 0)
+			{
+				numPoints++;
+				cv::Vec3b c = src.at<cv::Vec3b>(p);
+				minH = min(minH, c[0]);
+				minS = min(minS, c[1]);
+				minV = min(minV, c[2]);
+				maxH = max(maxH, c[0]);
+				maxS = max(maxS, c[1]);
+				maxV = max(maxV, c[2]);
+				avgH += c[0];
+				avgS += c[1];
+				avgV += c[2];
+			}
+		}
+	}
+	avgH /= numPoints;
+	avgS /= numPoints;
+	avgV /= numPoints;
+	minH = avgH - (1.2 * (avgH - minH));
+	minS = avgS - (0.675 * (avgS - minS)) + 20;
+	minV = avgV - (1.25 * (avgV - minV));
+	maxH = avgH + (1.2 * (maxH - avgH));
+	maxS = avgS + (0.675 * (maxS - avgS)) + 20;
+	maxV = avgV + (1.25 * (maxV - avgV));
+
+	lower_hsv[0] = minH;
+	lower_hsv[1] = minS;
+	lower_hsv[2] = minV;
+	upper_hsv[0] = maxH;
+	upper_hsv[1] = maxS;
+	upper_hsv[2] = maxV;
+}
+
+
+void handleKeypress(int keypress, cv::Mat frame) {
 	switch (keypress) {
 	case 97: /* a */
 		activeOperation = Normal;
@@ -602,6 +647,11 @@ void handleKeypress(cv::Mat frame) {
 		break;
 	case 104: /* h */
 		break;
+
+	case 112: /* p */
+		backgroundSet = 0;
+		break;
+
 
 	case 113: /* q */
 		activeCamera = camera_front;
@@ -634,6 +684,305 @@ void handleKeypress(cv::Mat frame) {
 		break;
 	}
 
+}
+
+
+unsigned char *createImageBuffer(unsigned int bytes, unsigned char **devicePtr) {
+
+	unsigned char *ptr = NULL;
+	cudaSetDeviceFlags(cudaDeviceMapHost);
+	cudaHostAlloc(&ptr, bytes, cudaHostAllocMapped);
+	cudaHostGetDevicePointer(devicePtr, ptr, 0);
+	return ptr;
+}
+
+
+void invertBIWrapper(dim3 blocks, dim3 threads, unsigned char *src, int width, int height, unsigned char *dest)
+{
+#if TIME_GPU
+	cudaEventRecord(start);
+#endif
+
+	invertBI << <blocks, threads >> >(src, width, height, dest);
+	cudaDeviceSynchronize();
+
+#if TIME_GPU
+	cudaEventRecord(stop);
+	float ms = 0.0f;
+	cudaEventSynchronize(stop);
+	cudaEventElapsedTime(&ms, start, stop);
+	std::cout << "Elapsed GPU time: " << ms << " milliseconds" << std::endl;
+#endif
+}
+__global__ void invertBI(unsigned char *src, int width, int height, unsigned char *dest)
+{
+	int x = (blockIdx.x * blockDim.x) + threadIdx.x;
+	int y = (blockIdx.y * blockDim.y) + threadIdx.y;
+	int i = (y * width) + x;
+
+	dest[i] = ( src[i] > 0 ) ? 0 : 255;
+}
+
+
+void logicalAndWrapper(dim3 blocks, dim3 threads, unsigned char *src1, unsigned char *src2, unsigned char *dest, int width, int height) {
+#if TIME_GPU
+	cudaEventRecord(start);
+#endif
+
+	logicalAnd << <blocks, threads >> >(src1, src2, dest, width, height);
+	cudaDeviceSynchronize();
+
+#if TIME_GPU
+	cudaEventRecord(stop);
+	float ms = 0.0f;
+	cudaEventSynchronize(stop);
+	cudaEventElapsedTime(&ms, start, stop);
+	std::cout << "Elapsed GPU time: " << ms << " milliseconds" << std::endl;
+#endif
+}
+__global__ void logicalAnd(unsigned char *src1, unsigned char *src2, unsigned char *dest, int width, int height)
+{
+	int x = (blockIdx.x * blockDim.x) + threadIdx.x;
+	int y = (blockIdx.y * blockDim.y) + threadIdx.y;
+	int i = (y * width) + x;
+
+	dest[i] = ((src1[i] > 0) && (src2[i] > 0)) ? 255 : 0;
+}
+
+
+void convolveWrapper(dim3 blocks, dim3 threads, unsigned char *src, int width, int height, int paddingX, int paddingY, size_t kOffset, int kWidth, int kHeight, unsigned char *dest) {
+#if TIME_GPU
+	cudaEventRecord(start);
+#endif
+
+	convolve << <blocks, threads >> > (src, width, height, paddingX, paddingY, kOffset, kWidth, kHeight, dest);
+	cudaDeviceSynchronize();
+
+#if TIME_GPU
+	cudaEventRecord(stop);
+	float ms = 0.0f;
+	cudaEventSynchronize(stop);
+	cudaEventElapsedTime(&ms, start, stop);
+	std::cout << "Elapsed GPU time: " << ms << " milliseconds" << std::endl;
+#endif
+}
+__global__ void convolve(unsigned char *src, int width, int height, int paddingX, int paddingY, size_t kOffset, int kWidth, int kHeight, unsigned char *dest) {
+
+	int x = (blockIdx.x * blockDim.x) + threadIdx.x;
+	int y = (blockIdx.y * blockDim.y) + threadIdx.y;
+
+	float sum = 0.0;
+	int pWidth = kWidth / 2;
+	int pHeight = kHeight / 2;
+
+	// Only execute for valid pixels
+	if (x >= pWidth + paddingX &&
+		y >= pHeight + paddingY &&
+		x < (blockDim.x * gridDim.x) - pWidth - paddingX &&
+		y < (blockDim.y * gridDim.y) - pHeight - paddingY)
+	{
+		for (int j = -pHeight; j <= pHeight; j++)
+		{
+			for (int i = -pWidth; i <= pWidth; i++)
+			{
+				// Sample the weight for this location
+				int ki = (i + pWidth);
+				int kj = (j + pHeight);
+				float w = convolutionKernelStore[(kj * kWidth) + ki + kOffset];
+
+
+				sum += w * float(src[((y + j) * width) + (x + i)]);
+			}
+		}
+	}
+
+	dest[(y * width) + x] = (unsigned char)sum;
+}
+
+
+void subtractImagesWrapper(dim3 blocks, dim3 threads, unsigned char *img1, unsigned char *img2, int width, int height, float threshold, unsigned char *dest) {
+#if TIME_GPU
+	cudaEventRecord(start);
+#endif
+
+	subtractImages << <blocks, threads >> > (img1, img2, width, height, threshold, dest);
+	cudaDeviceSynchronize();
+
+#if TIME_GPU
+	cudaEventRecord(stop);
+	float ms = 0.0f;
+	cudaEventSynchronize(stop);
+	cudaEventElapsedTime(&ms, start, stop);
+	std::cout << "Elapsed GPU time: " << ms << " milliseconds" << std::endl;
+#endif
+}
+__global__ void subtractImages(unsigned char *img1, unsigned char *img2, int width, int height, float threshold, unsigned char *dest) {
+
+	int x = (blockIdx.x * blockDim.x) + threadIdx.x;
+	int y = (blockIdx.y * blockDim.y) + threadIdx.y;
+
+	float pixelDifference = abs(img1[(y * width) + x] - img2[(y * width) + x]);
+	if (pixelDifference > threshold) {
+		dest[(y * width) + x] = 255;
+	}
+	else {
+		dest[(y * width) + x] = 0;
+	}
+}
+
+
+void erodeFilterWrapper(dim3 blocks, dim3 threads, unsigned char *src, int width, int height, int paddingX, int paddingY, size_t kOffset, int kWidth, int kHeight, unsigned char *dest) {
+#if TIME_GPU
+	cudaEventRecord(start);
+#endif
+
+	erodeFilter << <blocks, threads >> > (src, width, height, paddingX, paddingY, kOffset, kWidth, kHeight, dest);
+	cudaDeviceSynchronize();
+
+#if TIME_GPU
+	cudaEventRecord(stop);
+	float ms = 0.0f;
+	cudaEventSynchronize(stop);
+	cudaEventElapsedTime(&ms, start, stop);
+	std::cout << "Elapsed GPU time: " << ms << " milliseconds" << std::endl;
+#endif
+}
+__global__ void erodeFilter(unsigned char *src, int width, int height, int paddingX, int paddingY, size_t kOffset, int kWidth, int kHeight, unsigned char *dest)
+{
+	int x = (blockIdx.x * blockDim.x) + threadIdx.x;
+	int y = (blockIdx.y * blockDim.y) + threadIdx.y;
+
+	bool erode = false;
+	int pWidth = kWidth / 2;
+	int pHeight = kHeight / 2;
+
+	// Only execute for valid pixels
+	if (x >= pWidth + paddingX &&
+		y >= pHeight + paddingY &&
+		x < (blockDim.x * gridDim.x) - pWidth - paddingX &&
+		y < (blockDim.y * gridDim.y) - pHeight - paddingY)
+	{
+		for (int j = -pHeight; j <= pHeight && !erode; j++)
+		{
+			for (int i = -pWidth; i <= pWidth && !erode; i++)
+			{
+				// Sample the weight for this location
+				int ki = (i + pWidth);
+				int kj = (j + pHeight);
+				if (structuringElementStore[(kj * kWidth) + ki + kOffset] > 0)
+				{
+					int px = x + i;
+					int py = y + j;
+					erode = !(src[(py * width) + px] > 0);
+				}
+			}
+		}
+		dest[(y * width) + x] = (erode) ? 0 : 255;
+	}
+}
+
+
+void erodeTemplateFilterWrapper(dim3 blocks, dim3 threads, unsigned char *src, int width, int height, int paddingX, int paddingY, unsigned char *objTemplate, int tWidth, int tHeight, unsigned char *dest) {
+#if TIME_GPU
+	cudaEventRecord(start);
+#endif
+
+	erodeTemplateFilter << <blocks, threads >> > (src, width, height, paddingX, paddingY, objTemplate, tWidth, tHeight, dest);
+	cudaDeviceSynchronize();
+
+#if TIME_GPU
+	cudaEventRecord(stop);
+	float ms = 0.0f;
+	cudaEventSynchronize(stop);
+	cudaEventElapsedTime(&ms, start, stop);
+	std::cout << "Elapsed GPU time: " << ms << " milliseconds" << std::endl;
+#endif
+}
+__global__ void erodeTemplateFilter(unsigned char *src, int width, int height, int paddingX, int paddingY, unsigned char *objTemplate, int tWidth, int tHeight, unsigned char *dest)
+{
+	int x = (blockIdx.x * blockDim.x) + threadIdx.x;
+	int y = (blockIdx.y * blockDim.y) + threadIdx.y;
+
+	bool erode = false;
+	int pWidth = tWidth / 2;
+	int pHeight = tHeight / 2;
+
+	// Only execute for valid pixels
+	if (x >= pWidth + paddingX &&
+		y >= pHeight + paddingY &&
+		x < (blockDim.x * gridDim.x) - pWidth - paddingX &&
+		y < (blockDim.y * gridDim.y) - pHeight - paddingY)
+	{
+		for (int j = -pHeight; j <= pHeight && !erode; j++)
+		{
+			for (int i = -pWidth; i <= pWidth && !erode; i++)
+			{
+				// Sample the weight for this location
+				int ki = (i + pWidth);
+				int kj = (j + pHeight);
+				if (objTemplate[(kj * tWidth) + ki] > 0)
+				{
+					int px = x + i;
+					int py = y + j;
+					erode = !(src[(py * width) + px] > 0);
+				}
+			}
+		}
+		dest[(y * width) + x] = (erode) ? 0 : 255;
+	}
+}
+
+
+void dilateFilterWrapper(dim3 blocks, dim3 threads, unsigned char *src, int width, int height, int paddingX, int paddingY, size_t kOffset, int kWidth, int kHeight, unsigned char *dest) {
+#if TIME_GPU
+	cudaEventRecord(start);
+#endif
+	memset(dest, 0, width*height);
+	dilateFilter << <blocks, threads >> > (src, width, height, paddingX, paddingY, kOffset, kWidth, kHeight, dest);
+	cudaDeviceSynchronize();
+
+#if TIME_GPU
+	cudaEventRecord(stop);
+	float ms = 0.0f;
+	cudaEventSynchronize(stop);
+	cudaEventElapsedTime(&ms, start, stop);
+	std::cout << "Elapsed GPU time: " << ms << " milliseconds" << std::endl;
+#endif
+}
+__global__ void dilateFilter(unsigned char *src, int width, int height, int paddingX, int paddingY, size_t kOffset, int kWidth, int kHeight, unsigned char *dest)
+{
+	int x = (blockIdx.x * blockDim.x) + threadIdx.x;
+	int y = (blockIdx.y * blockDim.y) + threadIdx.y;
+
+	int pWidth = kWidth / 2;
+	int pHeight = kHeight / 2;
+
+	// Only execute for valid pixels
+	if (x >= pWidth + paddingX &&
+		y >= pHeight + paddingY &&
+		x < (blockDim.x * gridDim.x) - pWidth - paddingX &&
+		y < (blockDim.y * gridDim.y) - pHeight - paddingY)
+	{
+		// is this pixel on?
+		if (src[(y * width) + x] > 0)
+		{
+			// Dilate!!!
+			for (int j = -pHeight; j <= pHeight; j++)
+			{
+				for (int i = -pWidth; i <= pWidth; i++)
+				{
+					int ki = (i + pWidth);
+					int kj = (j + pHeight);
+					if (structuringElementStore[(kj * kWidth) + ki + kOffset] > 0)
+					{
+						int px = x + i;
+						int py = y + j;
+						dest[(py * width) + px] = 255;
+					}
+				}
+			}
+		}
+	}
 }
 #endif
 
@@ -674,11 +1023,11 @@ unsigned char *createImageBuffer(unsigned int bytes, unsigned char **devicePtr);
 void pythagorasWrapper(dim3 blocks, dim3 threads, unsigned char *a, unsigned char *b, unsigned char *c);
 __global__ void pythagoras(unsigned char *a, unsigned char *b, unsigned char *c);
 
-void convolveWrapper(dim3 blocks, dim3 threads, unsigned char *source, int width, int height, int paddingX, int paddingY, size_t kOffset, int kWidth, int kHeight, unsigned char *destination);
-__global__ void convolve(unsigned char *source, int width, int height, int paddingX, int paddingY, size_t kOffset, int kWidth, int kHeight, unsigned char *destination);
+void convolveWrapper(dim3 blocks, dim3 threads, unsigned char *src, int width, int height, int paddingX, int paddingY, size_t kOffset, int kWidth, int kHeight, unsigned char *dest);
+__global__ void convolve(unsigned char *src, int width, int height, int paddingX, int paddingY, size_t kOffset, int kWidth, int kHeight, unsigned char *dest);
 
 void pythagoras_slow(unsigned char *a, unsigned char *b, unsigned char *c, int width, int height);
-void convolve_slow(unsigned char *source, int width, int height, int paddingX, int paddingY, size_t kOffset, int kWidth, int kHeight, const float *kernel, unsigned char *destination);
+void convolve_slow(unsigned char *src, int width, int height, int paddingX, int paddingY, size_t kOffset, int kWidth, int kHeight, const float *kernel, unsigned char *dest);
 
 void handleKeypress();
 int keypress;
@@ -720,7 +1069,7 @@ int main() {
 	clock_t start_clock, end_clock;
 	double cpu_time_used;
 
-	const float gaussianKernel[25] =
+	const float gaussian5x5Kernel[25] =
 	{
 		2.f / 159.f,  4.f / 159.f,  5.f / 159.f,  4.f / 159.f, 2.f / 159.f,
 		4.f / 159.f,  9.f / 159.f, 12.f / 159.f,  9.f / 159.f, 4.f / 159.f,
@@ -728,10 +1077,10 @@ int main() {
 		4.f / 159.f,  9.f / 159.f, 12.f / 159.f,  9.f / 159.f, 4.f / 159.f,
 		2.f / 159.f,  4.f / 159.f,  5.f / 159.f,  4.f / 159.f, 2.f / 159.f,
 	};
-	cudaMemcpyToSymbol(convolutionKernelStore, gaussianKernel, sizeof(gaussianKernel), 0);
-	const size_t gaussianKernelOffset = 0;
+	cudaMemcpyToSymbol(convolutionKernelStore, gaussian5x5Kernel, sizeof(gaussian5x5Kernel), 0);
+	const size_t gaussian5x5KernelOffset = 0;
 
-	const float embossKernel[9] =
+	const float emboss3x3Kernel[9] =
 	{
 		1.f, 2.f, 1.f,
 		0.f, 0.f, 0.f,
@@ -743,34 +1092,34 @@ int main() {
 		-1.f, 5.f, -1.f,
 		0.f, -1.f, 0.f,*/
 	};
-	cudaMemcpyToSymbol(convolutionKernelStore, embossKernel, sizeof(embossKernel), sizeof(gaussianKernel));
-	const size_t embossKernelOffset = sizeof(gaussianKernel) / sizeof(float);
+	cudaMemcpyToSymbol(convolutionKernelStore, emboss3x3Kernel, sizeof(emboss3x3Kernel), sizeof(gaussian5x5Kernel));
+	const size_t emboss3x3KernelOffset = sizeof(gaussian5x5Kernel) / sizeof(float);
 
-	const float outlineKernel[9] =
+	const float outline3x3Kernel[9] =
 	{
 		-1.f, -1.f, -1.f,
 		-1.f, 8.f, -1.f,
 		-1.f, -1.f, -1.f,
 	};
-	cudaMemcpyToSymbol(convolutionKernelStore, outlineKernel, sizeof(outlineKernel), sizeof(gaussianKernel) + sizeof(embossKernel));
-	const size_t outlineKernelOffset = sizeof(embossKernel) / sizeof(float) + embossKernelOffset;
+	cudaMemcpyToSymbol(convolutionKernelStore, outline3x3Kernel, sizeof(outline3x3Kernel), sizeof(gaussian5x5Kernel) + sizeof(emboss3x3Kernel));
+	const size_t outline3x3KernelOffset = sizeof(emboss3x3Kernel) / sizeof(float) + emboss3x3KernelOffset;
 
-	const float leftSobelKernel[9] =
+	const float leftSobel3x3Kernel[9] =
 	{
 		1.f, 0.f, -1.f,
 		2.f, 0.f, -2.f,
 		1.f, 0.f, -1.f,
 	};
-	cudaMemcpyToSymbol(convolutionKernelStore, leftSobelKernel, sizeof(leftSobelKernel), sizeof(gaussianKernel) + sizeof(embossKernel) + sizeof(outlineKernel));
-	const size_t leftSobelKernelOffset = sizeof(outlineKernel) / sizeof(float) + outlineKernelOffset;
-	const float topSobelKernel[9] =
+	cudaMemcpyToSymbol(convolutionKernelStore, leftSobel3x3Kernel, sizeof(leftSobel3x3Kernel), sizeof(gaussian5x5Kernel) + sizeof(emboss3x3Kernel) + sizeof(outline3x3Kernel));
+	const size_t leftSobel3x3KernelOffset = sizeof(outline3x3Kernel) / sizeof(float) + outline3x3KernelOffset;
+	const float topSobel3x3Kernel[9] =
 	{
 		1.f, 2.f, 1.f,
 		0.f, 0.f, 0.f,
 		-1.f, -2.f, -1.f,
 	};
-	cudaMemcpyToSymbol(convolutionKernelStore, topSobelKernel, sizeof(topSobelKernel), sizeof(gaussianKernel) + sizeof(embossKernel) + sizeof(outlineKernel) + sizeof(leftSobelKernel));
-	const size_t topSobelKernelOffset = sizeof(leftSobelKernel) / sizeof(float) + leftSobelKernelOffset;
+	cudaMemcpyToSymbol(convolutionKernelStore, topSobel3x3Kernel, sizeof(topSobel3x3Kernel), sizeof(gaussian5x5Kernel) + sizeof(emboss3x3Kernel) + sizeof(outline3x3Kernel) + sizeof(leftSobel3x3Kernel));
+	const size_t topSobel3x3KernelOffset = sizeof(leftSobel3x3Kernel) / sizeof(float) + leftSobel3x3KernelOffset;
 
 	activeCamera >> frame;
 	unsigned char *leftSobelDataDevice, *topSobelDataDevice;
@@ -807,22 +1156,22 @@ int main() {
 					display = greyscale;
 					break;
 				case Blurred:
-					convolveWrapper(cblocks, cthreads, greyscaleDataDevice, frame.size().width, frame.size().height, 0, 0, gaussianKernelOffset, 5, 5, blurredDataDevice);
+					convolveWrapper(cblocks, cthreads, greyscale.data, frame.size().width, frame.size().height, 0, 0, gaussian5x5KernelOffset, 5, 5, blurred.data);
 					display = blurred;
 					break;
 				case Embossed:
-					convolveWrapper(cblocks, cthreads, greyscaleDataDevice, frame.size().width, frame.size().height, 0, 0, embossKernelOffset, 3, 3, embossedDataDevice);
+					convolveWrapper(cblocks, cthreads, greyscale.data, frame.size().width, frame.size().height, 0, 0, emboss3x3KernelOffset, 3, 3, embossed.data);
 					display = embossed;
 					break;
 				case Outline:
-					convolveWrapper(cblocks, cthreads, greyscaleDataDevice, frame.size().width, frame.size().height, 0, 0, outlineKernelOffset, 3, 3, outlineDataDevice);
+					convolveWrapper(cblocks, cthreads, greyscale.data, frame.size().width, frame.size().height, 0, 0, outline3x3KernelOffset, 3, 3, outline.data);
 					display = outline;
 					break;
 				case Sobel:
-					convolveWrapper(cblocks, cthreads, greyscaleDataDevice, frame.size().width, frame.size().height, 0, 0, gaussianKernelOffset, 5, 5, blurredDataDevice);
-					convolveWrapper(cblocks, cthreads, blurredDataDevice, frame.size().width, frame.size().height, 0, 0, leftSobelKernelOffset, 3, 3, leftSobelDataDevice);
-					convolveWrapper(cblocks, cthreads, blurredDataDevice, frame.size().width, frame.size().height, 0, 0, topSobelKernelOffset, 3, 3, topSobelDataDevice);
-					pythagorasWrapper(pblocks, pthreads, leftSobelDataDevice, topSobelDataDevice, sobelDataDevice);
+					convolveWrapper(cblocks, cthreads, greyscale.data, frame.size().width, frame.size().height, 0, 0, gaussian5x5KernelOffset, 5, 5, blurred.data);
+					convolveWrapper(cblocks, cthreads, blurred.data, frame.size().width, frame.size().height, 0, 0, leftSobel3x3KernelOffset, 3, 3, leftSobel.data);
+					convolveWrapper(cblocks, cthreads, blurred.data, frame.size().width, frame.size().height, 0, 0, topSobel3x3KernelOffset, 3, 3, topSobel.data);
+					pythagorasWrapper(pblocks, pthreads, leftSobel.data, topSobel.data, sobel.data);
 					display = sobel;
 					break;
 				default:
@@ -840,22 +1189,22 @@ int main() {
 				display = greyscale;
 				break;
 			case Blurred:
-				convolve_slow(greyscaleDataDevice, frame.size().width, frame.size().height, 0, 0, gaussianKernelOffset, 5, 5, gaussianKernel, blurredDataDevice);
+				convolve_slow(greyscale.data, frame.size().width, frame.size().height, 0, 0, gaussian5x5KernelOffset, 5, 5, gaussian5x5Kernel, blurred.data);
 				display = blurred;
 				break;
 			case Embossed:
-				convolve_slow(greyscaleDataDevice, frame.size().width, frame.size().height, 0, 0, embossKernelOffset, 3, 3, embossKernel, embossedDataDevice);
+				convolve_slow(greyscale.data, frame.size().width, frame.size().height, 0, 0, emboss3x3KernelOffset, 3, 3, emboss3x3Kernel, embossed.data);
 				display = embossed;
 				break;
 			case Outline:
-				convolve_slow(greyscaleDataDevice, frame.size().width, frame.size().height, 0, 0, outlineKernelOffset, 3, 3, outlineKernel, outlineDataDevice);
+				convolve_slow(greyscale.data, frame.size().width, frame.size().height, 0, 0, outline3x3KernelOffset, 3, 3, outline3x3Kernel, outline.data);
 				display = outline;
 				break;
 			case Sobel:
-				convolve_slow(greyscaleDataDevice, frame.size().width, frame.size().height, 0, 0, gaussianKernelOffset, 5, 5, gaussianKernel, blurredDataDevice);
-				convolve_slow(blurredDataDevice, frame.size().width, frame.size().height, 0, 0, leftSobelKernelOffset, 3, 3, leftSobelKernel, leftSobelDataDevice);
-				convolve_slow(blurredDataDevice, frame.size().width, frame.size().height, 0, 0, topSobelKernelOffset, 3, 3, topSobelKernel, topSobelDataDevice);
-				pythagoras_slow(leftSobelDataDevice, topSobelDataDevice, sobelDataDevice, frame.size().width, frame.size().height);
+				convolve_slow(greyscale.data, frame.size().width, frame.size().height, 0, 0, gaussian5x5KernelOffset, 5, 5, gaussian5x5Kernel, blurred.data);
+				convolve_slow(blurred.data, frame.size().width, frame.size().height, 0, 0, leftSobel3x3KernelOffset, 3, 3, leftSobel3x3Kernel, leftSobel.data);
+				convolve_slow(blurred.data, frame.size().width, frame.size().height, 0, 0, topSobel3x3KernelOffset, 3, 3, topSobel3x3Kernel, topSobel.data);
+				pythagoras_slow(leftSobel.data, topSobel.data, sobel.data, frame.size().width, frame.size().height);
 				display = sobel;
 			default:
 				break;
@@ -930,12 +1279,12 @@ __global__ void pythagoras(unsigned char *a, unsigned char *b, unsigned char *c)
 }
 
 
-void convolveWrapper(dim3 blocks, dim3 threads, unsigned char *source, int width, int height, int paddingX, int paddingY, size_t kOffset, int kWidth, int kHeight, unsigned char *destination) {
+void convolveWrapper(dim3 blocks, dim3 threads, unsigned char *src, int width, int height, int paddingX, int paddingY, size_t kOffset, int kWidth, int kHeight, unsigned char *dest) {
 #if TIME_GPU
 	cudaEventRecord(start);
 #endif
 
-	convolve << <blocks, threads >> > (source, width, height, paddingX, paddingY, kOffset, kWidth, kHeight, destination);
+	convolve << <blocks, threads >> > (src, width, height, paddingX, paddingY, kOffset, kWidth, kHeight, dest);
 	cudaDeviceSynchronize();
 
 #if TIME_GPU
@@ -946,7 +1295,7 @@ void convolveWrapper(dim3 blocks, dim3 threads, unsigned char *source, int width
 	std::cout << "Elapsed GPU time: " << ms << " milliseconds" << std::endl;
 #endif
 }
-__global__ void convolve(unsigned char *source, int width, int height, int paddingX, int paddingY, size_t kOffset, int kWidth, int kHeight, unsigned char *destination) {
+__global__ void convolve(unsigned char *src, int width, int height, int paddingX, int paddingY, size_t kOffset, int kWidth, int kHeight, unsigned char *dest) {
 
 	int x = (blockIdx.x * blockDim.x) + threadIdx.x;
 	int y = (blockIdx.y * blockDim.y) + threadIdx.y;
@@ -971,12 +1320,12 @@ __global__ void convolve(unsigned char *source, int width, int height, int paddi
 				float w = convolutionKernelStore[(kj * kWidth) + ki + kOffset];
 
 
-				sum += w * float(source[((y + j) * width) + (x + i)]);
+				sum += w * float(src[((y + j) * width) + (x + i)]);
 			}
 		}
 	}
 
-	destination[(y * width) + x] = (unsigned char)sum;
+	dest[(y * width) + x] = (unsigned char)sum;
 }
 
 
@@ -991,13 +1340,13 @@ void pythagoras_slow(unsigned char *a, unsigned char *b, unsigned char *c, int w
 
 }
 
-void convolve_slow(unsigned char *source, int width, int height, int paddingX, int paddingY, size_t kOffset, int kWidth, int kHeight, const float *kernel, unsigned char *destination) {
+void convolve_slow(unsigned char *src, int width, int height, int paddingX, int paddingY, size_t kOffset, int kWidth, int kHeight, const float *kernel, unsigned char *dest) {
 
 	/*for (int y = 0; y < height; y++)
 	{
 	for (int x = 0; x < width; x++)
 	{
-	source[(y * width) + x]
+	src[(y * width) + x]
 	}*/
 	for (int k = 0; k < width * height; k++) {
 		float sum = 0.0;
@@ -1017,10 +1366,10 @@ void convolve_slow(unsigned char *source, int width, int height, int paddingX, i
 					// Sample the weight for this location
 					float w = kernel[(j * kWidth) + i];
 
-					sum += w * source[((y + j) * width) + (x + i)];
+					sum += w * src[((y + j) * width) + (x + i)];
 
 					/*if ((k > 2000) && (k < 2010)) {
-					std::cout << "Kernel Index " << (int)(kj * kWidth) + ki << "   val at Kernel Index " << w <<  "    K " << k <<  "   Source Index " << ((y + j) * width) + (x + i) << "    Sum " << sum << std::endl;
+					std::cout << "Kernel Index " << (int)(kj * kWidth) + ki << "   val at Kernel Index " << w <<  "    K " << k <<  "   src Index " << ((y + j) * width) + (x + i) << "    Sum " << sum << std::endl;
 					}*/
 				}
 			}
@@ -1028,9 +1377,9 @@ void convolve_slow(unsigned char *source, int width, int height, int paddingX, i
 
 		sum = (sum < 0) ? 0 : sum;
 		sum = (sum > 255) ? 255 : sum;
-		destination[k] = sum;
+		dest[k] = sum;
 		/*if ((k > 2000) && (k < 2010)) {
-		std::cout << (int) source[k] << "    " << (int) destination[k] << "    " << std::endl;
+		std::cout << (int) src[k] << "    " << (int) dest[k] << "    " << std::endl;
 		}*/
 	}
 }
