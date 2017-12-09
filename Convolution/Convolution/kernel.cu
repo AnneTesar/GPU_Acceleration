@@ -1,4 +1,4 @@
-#if 1
+#if 0
 
 /*
 Credit and thanks to https://github.com/Teknoman117/cuda/blob/master/imgproc_example/main.cu
@@ -71,14 +71,14 @@ float threshold = 50;
 
 int main() {
 	if (!camera_front.isOpened()) {
-		std::cout << "Front camera not opened" << std::endl;
+		std::cout << "Camera 0 not opened" << std::endl;
 		activeCamera = camera_back;
 	}
 	if (!camera_back.isOpened()) {
-		std::cout << "Back camera not opened" << std::endl;
+		std::cout << "Camera 1 not opened" << std::endl;
 	}
 	if (!camera_usb.isOpened()) {
-		std::cout << "USB camera not opened" << std::endl;
+		std::cout << "Camera 2 not opened" << std::endl;
 	}
 
 	cv::Mat frame;
@@ -299,8 +299,6 @@ int main() {
 							cv::Range(left, right));
 						ballTemplateBuffer = part;
 
-						//dilateFilterWrapper(cblocks, cthreads, ballTemplateBufferDataDevice, ballTemplateBuffer.size().width, ballTemplateBuffer.size().height, 0, 0, binaryCircle5x5Offset, 5, 5, ballTemplateDataDevice);
-						//cv::imshow("Template", ballTemplate);
 						cv::imshow("Template Buffer", ballTemplateBuffer);
 
 
@@ -643,7 +641,7 @@ void handleKeypress(cv::Mat frame) {
 
 
 /* Convolution Filter Video */
-#if 0
+#if 1
 
 /*
 Credit and thanks to https://github.com/Teknoman117/cuda/blob/master/imgproc_example/main.cu
@@ -695,6 +693,7 @@ enum Kernels {
 }activeKernel;
 cv::VideoCapture camera_front(0);
 cv::VideoCapture camera_back(1);
+cv::VideoCapture camera_usb(2);
 cv::VideoCapture activeCamera = camera_front;
 
 int activeProcessing = 0; /* 0 = Use the GPU. 1 = Use the CPU */
@@ -702,8 +701,16 @@ int activeProcessing = 0; /* 0 = Use the GPU. 1 = Use the CPU */
 int main() {
 
 	cv::Mat frame;
-	if ((!camera_front.isOpened()) || (!camera_back.isOpened()))
-		return -1;
+	if (!camera_front.isOpened()) {
+		std::cout << "Camera 0 not opened" << std::endl;
+		activeCamera = camera_back;
+	}
+	if (!camera_back.isOpened()) {
+		std::cout << "Camera 1 not opened" << std::endl;
+	}
+	if (!camera_usb.isOpened()) {
+		std::cout << "Camera 2 not opened" << std::endl;
+	}
 
 #if TIME_GPU
 	cudaEventCreate(&start);
