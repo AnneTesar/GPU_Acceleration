@@ -1,4 +1,4 @@
-#if 0
+#if 1
 
 /*
 Credit and thanks to https://github.com/Teknoman117/cuda/blob/master/imgproc_example/main.cu
@@ -81,20 +81,16 @@ cv::VideoCapture camera_back(1);
 cv::VideoCapture camera_usb(2);
 cv::VideoCapture activeCamera = camera_front;
 
-// default calibration threshold
-float threshold = 50;
 
 
-cv::Mat frame;
-cv::Mat background;
-int backgroundSet = 0;
-recording = 0;
+
 
 #if TIME_GPU
 cudaEvent_t start, stop;
 #endif
 
 int main() {
+	
   if (!camera_front.isOpened()) {
 		std::cout << "Camera 0 not opened" << std::endl;
 		activeCamera = camera_back;
@@ -247,18 +243,6 @@ int main() {
 	// camera frame
 	cv::Mat frame;
 	cv::Mat frameOrig;
-
-	// setup cameras
-	if (!camera_front.isOpened()) {
-		std::cout << "Front camera not opened" << std::endl;
-		activeCamera = camera_back;
-	}
-	if (!camera_back.isOpened()) {
-		std::cout << "Back camera not opened" << std::endl;
-	}
-	if (!camera_usb.isOpened()) {
-		std::cout << "USB camera not opened" << std::endl;
-	}
 
 	// grab the first frame
 	activeCamera >> frameOrig;
@@ -990,7 +974,7 @@ __global__ void dilateFilter(unsigned char *src, int width, int height, int padd
 
 
 /* Convolution Filter Video */
-#if 1
+#if 0
 
 /*
 Credit and thanks to https://github.com/Teknoman117/cuda/blob/master/imgproc_example/main.cu
